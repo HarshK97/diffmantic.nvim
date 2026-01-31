@@ -5,15 +5,37 @@ function M.setup(opts) end
 
 function M.diff(args)
 	local parts = vim.split(args, " ", { trimempty = true })
-	local file1, file2 = parts[1], parts[2]
+	if #parts == 0 then
+		print("Please provide one or two files paths to compare.")
+		return
+	end
 
-	vim.cmd("tabnew")
-	vim.cmd("edit " .. file1)
-	local buf1 = vim.api.nvim_get_current_buf()
-	vim.cmd("vsplit " .. file2)
-	local buf2 = vim.api.nvim_get_current_buf()
+	local file1, file2 = parts[1], parts[2]
+	local buf1, buf2
+
+	if file2 then
+		-- Case: 2 files provided. Open them in split.
+		vim.cmd("tabnew")
+		vim.cmd("edit " .. file1)
+		buf1 = vim.api.nvim_get_current_buf()
+
+		vim.cmd("vsplit " .. file2)
+		buf2 = vim.api.nvim_get_current_buf()
+	else
+		-- Case: 1 file provided. Compare current buffer vs file.
+		buf1 = vim.api.nvim_get_current_buf()
+		local expanded_path = vim.fn.expand(file1)
+
+		vim.cmd("vsplit " .. expanded_path)
+		buf2 = vim.api.nvim_get_current_buf()
+	end
 
 	local lang = vim.treesitter.language.get_lang(vim.bo[buf1].filetype)
+	if not lang then
+		print("Unsupported filetype for Treesitter.")
+		return
+	end
+
 	local parser1 = vim.treesitter.get_parser(buf1, lang)
 	local parser2 = vim.treesitter.get_parser(buf2, lang)
 	local root1 = parser1:parse()[1]:root()
