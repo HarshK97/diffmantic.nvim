@@ -173,4 +173,162 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 	return mappings
 end
 
+function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf)
+	local function is_mapped(id, is_src)
+		for _, m in ipairs(mappings) do
+			if is_src and m.src == id then
+				return true
+			end
+			if not is_src and m.dst == id then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function get_mapping(id, is_src)
+		for _, m in ipairs(mappings) do
+			if is_src and m.src == id then
+				return m
+			end
+		end
+		return nil
+	end
+
+	-- LCS implementation
+	local function lcs(src_list, dst_list, hash_key)
+		local m, n = #src_list, #dst_list
+		if m == 0 or n == 0 then
+			return {}
+		end
+
+		local dp = {}
+		for i = 0, m do
+			dp[i] = {}
+			for j = 0, n do
+				dp[i][j] = 0
+			end
+		end
+
+		for i = 1, m do
+			for j = 1, n do
+				local s, d = src_list[i], dst_list[j]
+				if src_info[s:id()][hash_key] == dst_info[d:id()][hash_key] and s:type() == d:type() then
+					dp[i][j] = dp[i - 1][j - 1] + 1
+				else
+					dp[i][j] = math.max(dp[i - 1][j], dp[i][j - 1])
+				end
+			end
+		end
+
+		-- Backtrack to find matches
+		local result = {}
+		local i, j = m, n
+		while i > 0 and j > 0 do
+			local s, d = src_list[i], dst_list[j]
+			if src_info[s:id()][hash_key] == dst_info[d:id()][hash_key] and s:type() == d:type() then
+				table.insert(result, 1, { src = s, dst = d })
+				i, j = i - 1, j - 1
+			elseif dp[i - 1][j] > dp[i][j - 1] then
+				i = i - 1
+			else
+				j = j - 1
+			end
+		end
+		return result
+	end
+
+	-- Simple recovery function from https://hal.science/hal-04855170v1/file/GumTree_simple__fine_grained__accurate_and_scalable_source_differencing.pdf
+	local function simple_recovery(src_node, dst_node)
+		local src_children, dst_children = {}, {}
+		for child in src_node:iter_children() do
+			if not is_mapped(child:id(), true) then
+				table.insert(src_children, child)
+			end
+		end
+		for child in dst_node:iter_children() do
+			if not is_mapped(child:id(), false) then
+				table.insert(dst_children, child)
+			end
+		end
+		if #src_children == 0 or #dst_children == 0 then
+			return
+		end
+
+		-- Step 1: LCS on hash (exact match)
+		for _, match in ipairs(lcs(src_children, dst_children, "hash")) do
+			if not is_mapped(match.src:id(), true) and not is_mapped(match.dst:id(), false) then
+				table.insert(mappings, { src = match.src:id(), dst = match.dst:id() })
+			end
+		end
+
+		-- Rebuild unmapped lists
+		src_children, dst_children = {}, {}
+		for child in src_node:iter_children() do
+			if not is_mapped(child:id(), true) then
+				table.insert(src_children, child)
+			end
+		end
+		for child in dst_node:iter_children() do
+			if not is_mapped(child:id(), false) then
+				table.insert(dst_children, child)
+			end
+		end
+
+		-- Step 2: LCS on structure_hash (for updates)
+		for _, match in ipairs(lcs(src_children, dst_children, "structure_hash")) do
+			if not is_mapped(match.src:id(), true) and not is_mapped(match.dst:id(), false) then
+				table.insert(mappings, { src = match.src:id(), dst = match.dst:id() })
+			end
+		end
+
+		-- Rebuild unmapped lists again
+		src_children, dst_children = {}, {}
+		for child in src_node:iter_children() do
+			if not is_mapped(child:id(), true) then
+				table.insert(src_children, child)
+			end
+		end
+		for child in dst_node:iter_children() do
+			if not is_mapped(child:id(), false) then
+				table.insert(dst_children, child)
+			end
+		end
+
+		-- Step 3: Unique type matching
+		local src_by_type, dst_by_type = {}, {}
+		local src_type_count, dst_type_count = {}, {}
+		for _, c in ipairs(src_children) do
+			local t = c:type()
+			src_type_count[t] = (src_type_count[t] or 0) + 1
+			src_by_type[t] = c
+		end
+		for _, c in ipairs(dst_children) do
+			local t = c:type()
+			dst_type_count[t] = (dst_type_count[t] or 0) + 1
+			dst_by_type[t] = c
+		end
+
+		for t, count in pairs(src_type_count) do
+			if count == 1 and dst_type_count[t] == 1 then
+				local s, d = src_by_type[t], dst_by_type[t]
+				if not is_mapped(s:id(), true) and not is_mapped(d:id(), false) then
+					table.insert(mappings, { src = s:id(), dst = d:id() })
+					simple_recovery(s, d)
+				end
+			end
+		end
+	end
+
+	-- Apply recovery to all mapped nodes
+	for id, info in pairs(src_info) do
+		local mapping = get_mapping(id, true)
+		if mapping then
+			simple_recovery(info.node, dst_info[mapping.dst].node)
+		end
+	end
+
+	return mappings
+end
+
 return M

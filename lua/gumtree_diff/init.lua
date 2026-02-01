@@ -44,8 +44,33 @@ function M.diff(args)
 	local mappings, src_info, dst_info = core.top_down_match(root1, root2, buf1, buf2)
 	print("Top-down mappings: " .. #mappings)
 
+	local before_bottom_up = #mappings
 	mappings = core.bottom_up_match(mappings, src_info, dst_info, root1, root2, buf1, buf2)
-	print("Total mappings after Bottom-up: " .. #mappings)
+	print("Mappings after Bottom-up: " .. #mappings .. " (+" .. (#mappings - before_bottom_up) .. " new)")
+
+	local before_recovery = #mappings
+	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2)
+	local recovery_count = #mappings - before_recovery
+	print("Total mappings after Recovery: " .. #mappings .. " (+" .. recovery_count .. " new)")
+
+	if recovery_count > 0 then
+		print("\n=== New Mappings from Recovery ===")
+		for i = before_recovery + 1, #mappings do
+			local m = mappings[i]
+			local s = src_info[m.src]
+			local d = dst_info[m.dst]
+			if s and d then
+				local src_text = vim.treesitter.get_node_text(s.node, buf1):gsub("\n", " ")
+				local dst_text = vim.treesitter.get_node_text(d.node, buf2):gsub("\n", " ")
+				src_text = src_text:sub(1, 40)
+				dst_text = dst_text:sub(1, 40)
+				print(string.format("[%s] '%s' -> '%s'", s.type, src_text, dst_text))
+			end
+		end
+		print("==================================\n")
+	else
+		print("(Recovery found no new mappings)")
+	end
 
 	M.print_mappings(mappings, src_info, dst_info, buf1, buf2)
 end
