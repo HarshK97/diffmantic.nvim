@@ -9,6 +9,9 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 	local src_info = ts_utils.preprocess_tree(src_root, src_buf)
 	local dst_info = ts_utils.preprocess_tree(dst_root, dst_buf)
 
+	local src_mapped = {}
+	local dst_mapped = {}
+
 	-- Group nodes by their height in the tree
 	local function get_nodes_by_height(info)
 		local by_height = {}
@@ -36,26 +39,33 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 		end
 	end
 
-	-- For each height, match nodes with the same hash
+	-- For each height, match nodes with the same hash using hash indexing
 	for h = max_h, 1, -1 do
 		local s_nodes = src_by_height[h] or {}
 		local d_nodes = dst_by_height[h] or {}
 
+		local dst_by_hash = {}
+		for _, d in ipairs(d_nodes) do
+			if not dst_mapped[d.id] then
+				if not dst_by_hash[d.hash] then
+					dst_by_hash[d.hash] = {}
+				end
+				table.insert(dst_by_hash[d.hash], d)
+			end
+		end
+
 		for _, s in ipairs(s_nodes) do
-			for _, d in ipairs(d_nodes) do
-				if s.hash == d.hash then
-					-- Only map nodes that haven't been mapped yet
-					local s_mapped, d_mapped = false, false
-					for _, m in ipairs(mappings) do
-						if m.src == s.id then
-							s_mapped = true
+			if not src_mapped[s.id] then
+				local candidates = dst_by_hash[s.hash]
+				if candidates then
+					for i, d in ipairs(candidates) do
+						if not dst_mapped[d.id] then
+							table.insert(mappings, { src = s.id, dst = d.id })
+							src_mapped[s.id] = true
+							dst_mapped[d.id] = true
+							table.remove(candidates, i)
+							break
 						end
-						if m.dst == d.id then
-							d_mapped = true
-						end
-					end
-					if not s_mapped and not d_mapped then
-						table.insert(mappings, { src = s.id, dst = d.id })
 					end
 				end
 			end
