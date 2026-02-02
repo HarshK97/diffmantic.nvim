@@ -1,5 +1,6 @@
 local M = {}
 local core = require("gumtree_diff.core")
+local ui = require("gumtree_diff.ui")
 
 function M.setup(opts) end
 
@@ -105,6 +106,7 @@ function M.diff(args)
 	print("==================================\n")
 
 	M.print_mappings(mappings, src_info, dst_info, buf1, buf2)
+	ui.apply_highlights(buf1, buf2, actions)
 end
 
 function M.print_mappings(mappings, src_info, dst_info, buf1, buf2)
