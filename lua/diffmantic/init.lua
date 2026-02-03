@@ -1,7 +1,7 @@
 local M = {}
-local core = require("gumtree_diff.core")
-local ui = require("gumtree_diff.ui")
-local debug_utils = require("gumtree_diff.debug_utils")
+local core = require("diffmantic.core")
+local ui = require("diffmantic.ui")
+local debug_utils = require("diffmantic.debug_utils")
 
 function M.setup(opts) end
 

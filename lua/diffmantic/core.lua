@@ -1,4 +1,4 @@
-local ts_utils = require("gumtree_diff.treesitter")
+local ts_utils = require("diffmantic.treesitter")
 
 local M = {}
 
@@ -78,29 +78,12 @@ end
 -- Bottom-up matching: match nodes from leaves up, using parent mappings
 -- Tries to match nodes with the same type and label, and optionally name
 function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src_buf, dst_buf)
-	-- Check if a node is already mapped
-	local function is_mapped(id, is_src)
-		for _, m in ipairs(mappings) do
-			if is_src and m.src == id then
-				return true
-			end
-			if not is_src and m.dst == id then
-				return true
-			end
-		end
-		return false
-	end
-	-- Get the mapping for a node
-	local function get_mapping(id, is_src)
-		for _, m in ipairs(mappings) do
-			if is_src and m.src == id then
-				return m
-			end
-			if not is_src and m.dst == id then
-				return m
-			end
-		end
-		return nil
+	-- Build O(1) lookup tables
+	local src_to_dst = {}
+	local dst_to_src = {}
+	for _, m in ipairs(mappings) do
+		src_to_dst[m.src] = m.dst
+		dst_to_src[m.dst] = m.src
 	end
 
 	-- Get the name of a declaration node (function or variable)
@@ -168,7 +151,7 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 
 	-- Try to match unmapped nodes whose parent is mapped
 	for id, info in pairs(src_info) do
-		if not is_mapped(id, true) then
+		if not src_to_dst[id] then
 			local parent = info.parent
 			local parent_mapped = false
 			local dest_parent_id = nil
@@ -178,10 +161,10 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 			elseif parent:id() == src_root:id() then
 				parent_mapped = true
 			else
-				local m = get_mapping(parent:id(), true)
-				if m then
+				local dst_id = src_to_dst[parent:id()]
+				if dst_id then
 					parent_mapped = true
-					dest_parent_id = m.dst
+					dest_parent_id = dst_id
 				end
 			end
 
@@ -190,13 +173,13 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 				if dest_parent_id then
 					local d_parent = dst_info[dest_parent_id].node
 					for child in d_parent:iter_children() do
-						if not is_mapped(child:id(), false) then
+						if not dst_to_src[child:id()] then
 							table.insert(candidates, child)
 						end
 					end
 				else
 					for child in dst_root:iter_children() do
-						if not is_mapped(child:id(), false) then
+						if not dst_to_src[child:id()] then
 							table.insert(candidates, child)
 						end
 					end
@@ -214,10 +197,14 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 							local dst_name = get_declaration_name(cand, dst_buf)
 							if src_name == dst_name then
 								table.insert(mappings, { src = id, dst = cand:id() })
+								src_to_dst[id] = cand:id()
+								dst_to_src[cand:id()] = id
 								break
 							end
 						else
 							table.insert(mappings, { src = id, dst = cand:id() })
+							src_to_dst[id] = cand:id()
+							dst_to_src[cand:id()] = id
 							break
 						end
 					end
@@ -231,27 +218,12 @@ end
 
 -- Recovery matching: tries to match remaining unmapped nodes using LCS and unique type
 function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf)
-	-- Check if a node is already mapped
-	local function is_mapped(id, is_src)
-		for _, m in ipairs(mappings) do
-			if is_src and m.src == id then
-				return true
-			end
-			if not is_src and m.dst == id then
-				return true
-			end
-		end
-		return false
-	end
-
-	-- Get the mapping for a node
-	local function get_mapping(id, is_src)
-		for _, m in ipairs(mappings) do
-			if is_src and m.src == id then
-				return m
-			end
-		end
-		return nil
+	-- Build O(1) lookup tables
+	local src_to_dst = {}
+	local dst_to_src = {}
+	for _, m in ipairs(mappings) do
+		src_to_dst[m.src] = m.dst
+		dst_to_src[m.dst] = m.src
 	end
 
 	-- Longest Common Subsequence (LCS) for matching children
@@ -297,16 +269,23 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		return result
 	end
 
+	-- Helper to add a mapping and update lookup tables
+	local function add_mapping(src_id, dst_id)
+		table.insert(mappings, { src = src_id, dst = dst_id })
+		src_to_dst[src_id] = dst_id
+		dst_to_src[dst_id] = src_id
+	end
+
 	-- Try to match children using LCS and unique type
 	local function simple_recovery(src_node, dst_node)
 		local src_children, dst_children = {}, {}
 		for child in src_node:iter_children() do
-			if not is_mapped(child:id(), true) then
+			if not src_to_dst[child:id()] then
 				table.insert(src_children, child)
 			end
 		end
 		for child in dst_node:iter_children() do
-			if not is_mapped(child:id(), false) then
+			if not dst_to_src[child:id()] then
 				table.insert(dst_children, child)
 			end
 		end
@@ -316,38 +295,38 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 
 		-- Step 1: match children with same hash (exact match)
 		for _, match in ipairs(lcs(src_children, dst_children, "hash")) do
-			if not is_mapped(match.src:id(), true) and not is_mapped(match.dst:id(), false) then
-				table.insert(mappings, { src = match.src:id(), dst = match.dst:id() })
+			if not src_to_dst[match.src:id()] and not dst_to_src[match.dst:id()] then
+				add_mapping(match.src:id(), match.dst:id())
 			end
 		end
 
 		-- Step 2: match children with same structure_hash (for updates)
 		src_children, dst_children = {}, {}
 		for child in src_node:iter_children() do
-			if not is_mapped(child:id(), true) then
+			if not src_to_dst[child:id()] then
 				table.insert(src_children, child)
 			end
 		end
 		for child in dst_node:iter_children() do
-			if not is_mapped(child:id(), false) then
+			if not dst_to_src[child:id()] then
 				table.insert(dst_children, child)
 			end
 		end
 		for _, match in ipairs(lcs(src_children, dst_children, "structure_hash")) do
-			if not is_mapped(match.src:id(), true) and not is_mapped(match.dst:id(), false) then
-				table.insert(mappings, { src = match.src:id(), dst = match.dst:id() })
+			if not src_to_dst[match.src:id()] and not dst_to_src[match.dst:id()] then
+				add_mapping(match.src:id(), match.dst:id())
 			end
 		end
 
 		-- Step 3: match children with unique type (type appears only once)
 		src_children, dst_children = {}, {}
 		for child in src_node:iter_children() do
-			if not is_mapped(child:id(), true) then
+			if not src_to_dst[child:id()] then
 				table.insert(src_children, child)
 			end
 		end
 		for child in dst_node:iter_children() do
-			if not is_mapped(child:id(), false) then
+			if not dst_to_src[child:id()] then
 				table.insert(dst_children, child)
 			end
 		end
@@ -368,8 +347,8 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		for t, count in pairs(src_type_count) do
 			if count == 1 and dst_type_count[t] == 1 then
 				local s, d = src_by_type[t], dst_by_type[t]
-				if not is_mapped(s:id(), true) and not is_mapped(d:id(), false) then
-					table.insert(mappings, { src = s:id(), dst = d:id() })
+				if not src_to_dst[s:id()] and not dst_to_src[d:id()] then
+					add_mapping(s:id(), d:id())
 					simple_recovery(s, d)
 				end
 			end
@@ -378,9 +357,9 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 
 	-- Apply recovery to all mapped nodes
 	for id, info in pairs(src_info) do
-		local mapping = get_mapping(id, true)
-		if mapping then
-			simple_recovery(info.node, dst_info[mapping.dst].node)
+		local dst_id = src_to_dst[id]
+		if dst_id then
+			simple_recovery(info.node, dst_info[dst_id].node)
 		end
 	end
 
@@ -392,22 +371,12 @@ end
 function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 	local actions = {}
 
-	local function get_dst_id(src_id)
-		for _, m in ipairs(mappings) do
-			if m.src == src_id then
-				return m.dst
-			end
-		end
-		return nil
-	end
-
-	local function get_src_id(dst_id)
-		for _, m in ipairs(mappings) do
-			if m.dst == dst_id then
-				return m.src
-			end
-		end
-		return nil
+	-- Build O(1) lookup tables
+	local src_to_dst = {}
+	local dst_to_src = {}
+	for _, m in ipairs(mappings) do
+		src_to_dst[m.src] = m.dst
+		dst_to_src[m.dst] = m.src
 	end
 
 	local significant_types = {
@@ -439,24 +408,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 		class_definition = true,
 	}
 
-	-- helper to check if any ancestor is unmapped and significant
-	local function has_unmapped_significant_ancestor(info, node_info_table, get_mapped_id)
-		local current = info.parent
-		while current do
-			local p_id = current:id()
-			local p_info = node_info_table[p_id]
-			if p_info then
-				if not get_mapped_id(p_id) and significant_types[p_info.type] then
-					return true
-				end
-				current = p_info.parent
-			else
-				break
-			end
-		end
-		return false
-	end
-
 	-- Helper: check if node or any descendant has different content
 	local function has_content_change(src_node, dst_node)
 		local src_info_data = src_info[src_node:id()]
@@ -469,33 +420,69 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 		return false
 	end
 
-	local updated_src_ids = {}
-
 	local nodes_with_changes = {}
 	for _, m in ipairs(mappings) do
 		local s, d = src_info[m.src], dst_info[m.dst]
 		if has_content_change(s.node, d.node) then
 			nodes_with_changes[m.src] = true
-			updated_src_ids[m.src] = true
 		end
 	end
 
-	-- Helper: check if any mapped ancestor also has content changes
-	local function has_updated_significant_ancestor(info)
+	-- Precompute ancestry flags for source nodes (unmapped significant ancestors)
+	local src_has_unmapped_sig_ancestor = {}
+	for id, info in pairs(src_info) do
 		local current = info.parent
 		while current do
 			local p_id = current:id()
 			local p_info = src_info[p_id]
 			if p_info then
-				if nodes_with_changes[p_id] and significant_types[p_info.type] then
-					return true
+				if not src_to_dst[p_id] and significant_types[p_info.type] then
+					src_has_unmapped_sig_ancestor[id] = true
+					break
 				end
 				current = p_info.parent
 			else
 				break
 			end
 		end
-		return false
+	end
+
+	-- Precompute ancestry flags for destination nodes (unmapped significant ancestors)
+	local dst_has_unmapped_sig_ancestor = {}
+	for id, info in pairs(dst_info) do
+		local current = info.parent
+		while current do
+			local p_id = current:id()
+			local p_info = dst_info[p_id]
+			if p_info then
+				if not dst_to_src[p_id] and significant_types[p_info.type] then
+					dst_has_unmapped_sig_ancestor[id] = true
+					break
+				end
+				current = p_info.parent
+			else
+				break
+			end
+		end
+	end
+
+	-- Precompute ancestry flags for updated significant ancestors
+	local src_has_updated_sig_ancestor = {}
+	for id, info in pairs(src_info) do
+		local current = info.parent
+		while current do
+			local p_id = current:id()
+			local p_info = src_info[p_id]
+			if p_info then
+				if nodes_with_changes[p_id] and significant_types[p_info.type] then
+					src_has_updated_sig_ancestor[id] = true
+					break
+				end
+				current = p_info.parent
+			else
+				break
+			end
+		end
 	end
 
 	-- UPDATES: mapped nodes with different content, but only significant types without updated ancestors
@@ -503,7 +490,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 		local s, d = src_info[m.src], dst_info[m.dst]
 
 		if nodes_with_changes[m.src] and significant_types[s.type] then
-			if not has_updated_significant_ancestor(s) then
+			if not src_has_updated_sig_ancestor[m.src] then
 				table.insert(actions, { type = "update", node = s.node, target = d.node })
 			end
 		end
@@ -519,7 +506,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 			goto continue_move
 		end
 
-		local dst_of_src_parent = get_dst_id(s.parent:id())
+		local dst_of_src_parent = src_to_dst[s.parent:id()]
 		local is_move = false
 
 		local src_parent_is_root = (s.parent:id() == src_root:id())
@@ -538,7 +525,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 					break
 				end
 				local child_info = src_info[child:id()]
-				if get_dst_id(child:id()) and child_info and movable_types[child_info.type] then
+				if src_to_dst[child:id()] and child_info and movable_types[child_info.type] then
 					prev_src_sibling = child:id()
 				end
 			end
@@ -549,13 +536,13 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 					break
 				end
 				local child_info = dst_info[child:id()]
-				if get_src_id(child:id()) and child_info and movable_types[child_info.type] then
+				if dst_to_src[child:id()] and child_info and movable_types[child_info.type] then
 					prev_dst_sibling = child:id()
 				end
 			end
 
 			if prev_src_sibling then
-				local expected_prev = get_dst_id(prev_src_sibling)
+				local expected_prev = src_to_dst[prev_src_sibling]
 				if prev_dst_sibling ~= expected_prev then
 					is_move = true
 				end
@@ -578,8 +565,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 
 	-- DELETES: unmapped source nodes
 	for id, info in pairs(src_info) do
-		if not get_dst_id(id) and significant_types[info.type] then
-			if not has_unmapped_significant_ancestor(info, src_info, get_dst_id) then
+		if not src_to_dst[id] and significant_types[info.type] then
+			if not src_has_unmapped_sig_ancestor[id] then
 				table.insert(actions, { type = "delete", node = info.node })
 			end
 		end
@@ -587,8 +574,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
 
 	-- INSERTS: unmapped destination nodes
 	for id, info in pairs(dst_info) do
-		if not get_src_id(id) and significant_types[info.type] then
-			if not has_unmapped_significant_ancestor(info, dst_info, get_src_id) then
+		if not dst_to_src[id] and significant_types[info.type] then
+			if not dst_has_unmapped_sig_ancestor[id] then
 				table.insert(actions, { type = "insert", node = info.node })
 			end
 		end

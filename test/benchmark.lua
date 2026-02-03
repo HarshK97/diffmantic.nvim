@@ -1,9 +1,9 @@
 -- AI generated benchmark
 -- Benchmark tests for nvim-gumtree-diff
--- Tests performance with files from 100 to 1000 lines
+-- Tests performance with files from 100 to 10000 lines
 
-local core = require("gumtree_diff.core")
-local ts = require("gumtree_diff.treesitter")
+local core = require("diffmantic.core")
+local ts = require("diffmantic.treesitter")
 
 -- Redirect output to file for headless mode
 local output_file = io.open("/tmp/gumtree_benchmark.txt", "w")
@@ -192,6 +192,10 @@ local test_cases = {
 	{ "~500 lines", 50, 5, { swaps = 10, updates = 10 } },
 	{ "~750 lines", 75, 5, { swaps = 15, updates = 15 } },
 	{ "~1000 lines", 100, 5, { swaps = 20, updates = 20 } },
+	{ "~2500 lines", 280, 5, { swaps = 50, updates = 50 } },
+	{ "~5000 lines", 560, 5, { swaps = 100, updates = 100 } },
+	{ "~7500 lines", 840, 5, { swaps = 150, updates = 150 } },
+	{ "~10000 lines", 1120, 5, { swaps = 200, updates = 200 } },
 }
 
 for _, tc in ipairs(test_cases) do
