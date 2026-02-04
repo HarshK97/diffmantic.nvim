@@ -179,6 +179,83 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 		return nil
 	end
 
+	-- Try to extract a stable "value hash" for assignments to disambiguate renames.
+	local function get_assignment_value_hash(node, info)
+		if not node then
+			return nil
+		end
+		-- Python: expression_statement (assignment left: ..., right: ...)
+		if node:type() == "expression_statement" then
+			for child in node:iter_children() do
+				if child:type() == "assignment" then
+					local right = child:field("right")[1] or child:field("value")[1]
+					if not right then
+						local last = nil
+						for subchild in child:iter_children() do
+							last = subchild
+						end
+						right = last
+					end
+					if right and info[right:id()] then
+						return info[right:id()].hash
+					end
+				end
+			end
+		end
+		return nil
+	end
+
+	local function name_similarity(src_name, dst_name)
+		if not src_name or not dst_name then
+			return 0
+		end
+		if dst_name:find(src_name, 1, true) then
+			return 1
+		end
+		if src_name:find(dst_name, 1, true) then
+			return 1
+		end
+
+		local function tokens(name)
+			local out = {}
+			for part in name:gmatch("[A-Za-z0-9]+") do
+				table.insert(out, part:lower())
+			end
+			return out
+		end
+
+		local function token_match(a, b)
+			if a == b then
+				return true
+			end
+			if #a >= 3 and #b >= 3 then
+				if a:find(b, 1, true) == 1 or b:find(a, 1, true) == 1 then
+					return true
+				end
+			end
+			return false
+		end
+
+		local src_tokens = tokens(src_name)
+		local dst_tokens = tokens(dst_name)
+		if #src_tokens == 0 or #dst_tokens == 0 then
+			return 0
+		end
+
+		local common = 0
+		local used_dst = {}
+		for _, s in ipairs(src_tokens) do
+			for i, d in ipairs(dst_tokens) do
+				if not used_dst[i] and token_match(s, d) then
+					common = common + 1
+					used_dst[i] = true
+					break
+				end
+			end
+		end
+		return common / math.max(#src_tokens, #dst_tokens)
+	end
+
 	-- Types that have a name (function, variable)
 	local identifier_types = {
 		function_declaration = true,
@@ -186,6 +263,12 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 		class_definition = true,
 		function_definition = true,
 		expression_statement = true, 
+	}
+
+	local unique_structure_fallback_types = {
+		function_declaration = true,
+		function_definition = true,
+		class_definition = true,
 	}
 
 	-- Try to match unmapped nodes whose parent is mapped
@@ -228,7 +311,12 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 				if identifier_types[info.type] then
 					src_name = get_declaration_name(info.node, src_buf)
 				end
+				local src_value_hash = get_assignment_value_hash(info.node, src_info)
 
+				local rename_candidate = nil
+				local structure_candidates = {}
+				local rename_score = -1
+				local rename_tie = false
 				for _, cand in ipairs(candidates) do
 					local d_info = dst_info[cand:id()]
 					if d_info.type == info.type and d_info.label == info.label then
@@ -238,14 +326,47 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 								table.insert(mappings, { src = id, dst = cand:id() })
 								src_to_dst[id] = cand:id()
 								dst_to_src[cand:id()] = id
+								rename_candidate = nil
 								break
+							elseif dst_name and src_info[id].structure_hash == d_info.structure_hash then
+								local dst_value_hash = get_assignment_value_hash(cand, dst_info)
+								if src_value_hash and dst_value_hash and src_value_hash ~= dst_value_hash then
+									goto continue_candidate
+								end
+								table.insert(structure_candidates, cand:id())
+								local score = name_similarity(src_name, dst_name)
+								if score < 0.8 then
+									goto continue_candidate
+								end
+								if score > rename_score then
+									rename_candidate = cand:id()
+									rename_score = score
+									rename_tie = false
+								elseif score == rename_score and score > 0 then
+									rename_tie = true
+								end
 							end
 						else
 							table.insert(mappings, { src = id, dst = cand:id() })
 							src_to_dst[id] = cand:id()
 							dst_to_src[cand:id()] = id
+							rename_candidate = nil
 							break
 						end
+					end
+					::continue_candidate::
+				end
+
+				if not src_to_dst[id] and rename_candidate and not rename_tie and rename_score > 0 then
+					table.insert(mappings, { src = id, dst = rename_candidate })
+					src_to_dst[id] = rename_candidate
+					dst_to_src[rename_candidate] = id
+				elseif not src_to_dst[id] and unique_structure_fallback_types[info.type] then
+					if #structure_candidates == 1 then
+						local candidate_id = structure_candidates[1]
+						table.insert(mappings, { src = id, dst = candidate_id })
+						src_to_dst[id] = candidate_id
+						dst_to_src[candidate_id] = id
 					end
 				end
 			end
@@ -435,6 +556,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info)
         decorator = true,
 		-- C
         declaration = true,
+        field_declaration = true,
         preproc_include = true,
         preproc_def = true,
         preproc_function_def = true,
