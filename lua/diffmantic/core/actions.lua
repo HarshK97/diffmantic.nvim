@@ -48,6 +48,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if_statement = true,
 		return_statement = true,
 		expression_statement = true,
+		assignment = true,
+		assignment_statement = true,
 		for_statement = true,
 		while_statement = true,
 		function_call = true,
@@ -172,99 +174,91 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 	stop_timer(updates_start, "updates")
 
-	-- MOVES: check if parent changed or sibling order changed
+	-- MOVES: use LCS to find which top-level mapped functions changed relative order
+	-- Only functions not in the LCS are considered moved.
 	local moves_start = start_timer()
+	local movable_pairs = {} 
 	for _, m in ipairs(mappings) do
-		local s, d = src_info[m.src], dst_info[m.dst]
-		if not movable_types[s.type] then
-			goto continue_move
-		end
-		if not s.parent or not d.parent then
-			goto continue_move
-		end
-
-		local dst_of_src_parent = src_to_dst[s.parent:id()]
-		local is_move = false
-
-		local src_parent_is_root = (s.parent:id() == src_root:id())
-		local dst_parent_is_root = (d.parent:id() == dst_root:id())
-
-		if src_parent_is_root and dst_parent_is_root then
-			is_move = false
-		elseif dst_of_src_parent ~= d.parent:id() then
-			is_move = true
-		end
-
-		if not is_move then
-			local function mapped_movable_index(node, info_tbl, map_tbl)
-				if not node or not node:parent() then
-					return nil
-				end
-				local idx = 0
-				for child in node:parent():iter_children() do
-					local child_info = info_tbl[child:id()]
-					if child_info and movable_types[child_info.type] and map_tbl[child:id()] then
-						idx = idx + 1
-						if child:id() == node:id() then
-							return idx
-						end
-					end
-				end
-				return nil
+		local s = src_info[m.src]
+		if s and movable_types[s.type] then
+			local src_parent_is_root = s.parent and s.parent:id() == src_root:id()
+			local d = dst_info[m.dst]
+			local dst_parent_is_root = d and d.parent and d.parent:id() == dst_root:id()
+			if src_parent_is_root and dst_parent_is_root then
+				local src_line = s.node:range()
+				local dst_line = d.node:range()
+				table.insert(movable_pairs, {
+					src_id = m.src,
+					dst_id = m.dst,
+					src_line = src_line,
+					dst_line = dst_line,
+				})
 			end
+		end
+	end
 
-			local src_idx = mapped_movable_index(s.node, src_info, src_to_dst)
-			local dst_idx = mapped_movable_index(d.node, dst_info, dst_to_src)
-			if src_idx and dst_idx then
-				if src_idx == dst_idx then
-					goto continue_move
-				else
-					is_move = true
-				end
-			else
-				local prev_src_sibling = nil
-				for child in s.parent:iter_children() do
-					if child:id() == s.node:id() then
-						break
-					end
-					local child_info = src_info[child:id()]
-					if src_to_dst[child:id()] and child_info and movable_types[child_info.type] then
-						prev_src_sibling = child:id()
-					end
-				end
+	table.sort(movable_pairs, function(a, b)
+		return a.src_line < b.src_line
+	end)
 
-				local prev_dst_sibling = nil
-				for child in d.parent:iter_children() do
-					if child:id() == d.node:id() then
-						break
-					end
-					local child_info = dst_info[child:id()]
-					if dst_to_src[child:id()] and child_info and movable_types[child_info.type] then
-						prev_dst_sibling = child:id()
-					end
-				end
+	-- Get destination line orders and compute LCS
+	local dst_order = {}
+	for i, pair in ipairs(movable_pairs) do
+		dst_order[i] = pair.dst_line
+	end
 
-				if prev_src_sibling then
-					local expected_prev = src_to_dst[prev_src_sibling]
-					if prev_dst_sibling ~= expected_prev then
-						is_move = true
-					end
-				elseif prev_dst_sibling then
-					is_move = true
+	local function longest_increasing_subsequence(arr)
+		local n = #arr
+		if n == 0 then
+			return {}
+		end
+		local dp = {}
+		local prev = {}
+		for i = 1, n do
+			dp[i] = 1
+			prev[i] = nil
+			for j = 1, i - 1 do
+				if arr[j] < arr[i] and dp[j] + 1 > dp[i] then
+					dp[i] = dp[j] + 1
+					prev[i] = j
 				end
 			end
 		end
+		local max_len, max_idx = 0, 1
+		for i = 1, n do
+			if dp[i] > max_len then
+				max_len = dp[i]
+				max_idx = i
+			end
+		end
+		-- Reconstruct LIS indices
+		local lis_indices = {}
+		local idx = max_idx
+		while idx do
+			table.insert(lis_indices, 1, idx)
+			idx = prev[idx]
+		end
+		return lis_indices
+	end
 
-		if is_move then
-			local src_line = s.node:range()
-			local dst_line = d.node:range()
-			local line_diff = math.abs(dst_line - src_line)
+	local lis_indices = longest_increasing_subsequence(dst_order)
+	local in_lis = {}
+	for _, i in ipairs(lis_indices) do
+		in_lis[i] = true
+	end
+
+	-- Mark nodes NOT in LIS as moved (only if line difference is significant)
+	for i, pair in ipairs(movable_pairs) do
+		if not in_lis[i] then
+			local line_diff = math.abs(pair.dst_line - pair.src_line)
 			if line_diff > 3 then
-				table.insert(actions, { type = "move", node = s.node, target = d.node })
+				local s = src_info[pair.src_id]
+				local d = dst_info[pair.dst_id]
+				if s and d then
+					table.insert(actions, { type = "move", node = s.node, target = d.node })
+				end
 			end
 		end
-
-		::continue_move::
 	end
 	stop_timer(moves_start, "moves")
 
