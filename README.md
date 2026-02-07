@@ -1,6 +1,11 @@
-# diffmantic.nvim
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/logo-dark.png">
+    <img alt="Diffmantic Logo" src="images/logo-light.png">
+  </picture>
+</p>
 
-Semantic diff for Neovim using Treesitter. Understands code structure to detect moved functions, updated blocks, and real changes, not just line differences.
+Semantic diff for Neovim using Tree-sitter. Understands code structure to detect moved functions, updated blocks, and real changes, not just line differences.
 
 ![Demo](images/python.png)
 
@@ -9,7 +14,7 @@ Semantic diff for Neovim using Treesitter. Understands code structure to detect 
 - **Move detection** — Knows when code blocks are moved, not deleted and re-added
 - **Update detection** — Highlights modified code in place
 - **Insert/Delete detection** — Shows new and removed code
-- **Language agnostic** — Works with any language that has a Treesitter parser
+- **Language agnostic** — Works with any language that has a Tree-sitter parser
 
 ## Installation
 
@@ -49,7 +54,7 @@ Implements the [GumTree algorithm](https://hal.science/hal-04855170v1/file/GumTr
 ## Requirements
 
 - Neovim 0.9+
-- Treesitter parser for the language you're diffing
+- Tree-sitter parser for the language you're diffing
 
 ## License
 
