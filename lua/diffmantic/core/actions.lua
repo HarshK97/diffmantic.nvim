@@ -1,8 +1,23 @@
 local M = {}
 local semantic = require("diffmantic.core.semantic")
 
+local function range_metadata(node)
+	if not node then
+		return nil
+	end
+	local sr, sc, er, ec = node:range()
+	return {
+		start_row = sr,
+		start_col = sc,
+		end_row = er,
+		end_col = ec,
+		start_line = sr + 1,
+		end_line = er + 1,
+	}
+end
+
 -- Generate edit actions from node mappings
--- Actions describe what changed: insert, delete, update, move
+-- Actions describe what changed: insert, delete, update, move, rename
 function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, opts)
 	local actions = {}
 	local timings = nil
@@ -50,6 +65,52 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 					rename_pairs = rename_pairs,
 				}
 			end
+		end
+	end
+
+	local function emit_rename_actions(actions_list)
+		local renames = {}
+		local seen = {}
+
+		for _, action in ipairs(actions_list) do
+			if action.type == "update" and action.semantic and action.semantic.leaf_changes then
+				for _, change in ipairs(action.semantic.leaf_changes) do
+					local src_node = change.src_node
+					local dst_node = change.dst_node
+					if src_node and dst_node and change.src_text ~= change.dst_text then
+						local is_rename = semantic.is_rename_identifier(src_node) or semantic.is_rename_identifier(dst_node)
+						if is_rename then
+							local key = table.concat({
+								tostring(src_node:id()),
+								tostring(dst_node:id()),
+								change.src_text,
+								change.dst_text,
+							}, ":")
+
+							if not seen[key] then
+								seen[key] = true
+								table.insert(renames, {
+									type = "rename",
+									node = src_node,
+									target = dst_node,
+									from = change.src_text,
+									to = change.dst_text,
+									src_range = range_metadata(src_node),
+									dst_range = range_metadata(dst_node),
+									context = {
+										src_parent_type = action.node and action.node:type() or nil,
+										dst_parent_type = action.target and action.target:type() or nil,
+									},
+								})
+							end
+						end
+					end
+				end
+			end
+		end
+
+		for _, rename_action in ipairs(renames) do
+			table.insert(actions_list, rename_action)
 		end
 	end
 
@@ -313,6 +374,10 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	local semantic_start = start_timer()
 	enrich_update_actions_with_semantics(actions)
 	stop_timer(semantic_start, "semantic")
+
+	local rename_start = start_timer()
+	emit_rename_actions(actions)
+	stop_timer(rename_start, "renames")
 
 	return actions, timings
 end
