@@ -33,7 +33,7 @@ local function generate_lua_code(num_functions, vars_per_function)
 	return table.concat(lines, "\n")
 end
 
--- Generate modified version (swaps some functions, changes some values)
+-- Generate modified version (swaps some functions, changes some values, renames symbols)
 local function generate_modified_lua(num_functions, vars_per_function, changes)
 	local lines = {}
 	table.insert(lines, "-- Auto-generated benchmark file (modified)")
@@ -54,17 +54,37 @@ local function generate_modified_lua(num_functions, vars_per_function, changes)
 		end
 	end
 
+	local rename_fn_count = math.min(changes.renames or 0, num_functions)
+
 	for _, i in ipairs(order) do
-		table.insert(lines, string.format("function M.func_%d()", i))
+		local function_name = string.format("func_%d", i)
+		local renamed_function_name = nil
+		if i <= rename_fn_count then
+			renamed_function_name = function_name .. "_renamed"
+		end
+		table.insert(lines, string.format("function M.%s()", renamed_function_name or function_name))
+
+		local first_var = string.format("var_%d_1", i)
+		local renamed_first_var = nil
+		if i <= rename_fn_count then
+			renamed_first_var = string.format("renamed_%d_1", i)
+		end
+
 		for j = 1, vars_per_function do
+			local var_name = string.format("var_%d_%d", i, j)
+			if j == 1 and renamed_first_var then
+				var_name = renamed_first_var
+			end
 			local value = i * 100 + j
 			-- Change some values
 			if i <= (changes.updates or 0) and j == 1 then
 				value = value + 1000
 			end
-			table.insert(lines, string.format("  local var_%d_%d = %d", i, j, value))
+			table.insert(lines, string.format("  local %s = %d", var_name, value))
 		end
-		table.insert(lines, string.format("  return var_%d_1 + var_%d_%d", i, i, vars_per_function))
+
+		local return_first_var = renamed_first_var or first_var
+		table.insert(lines, string.format("  return %s + var_%d_%d", return_first_var, i, vars_per_function))
 		table.insert(lines, "end")
 		table.insert(lines, "")
 	end
@@ -84,7 +104,7 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 	log(string.format("\n=== %s ===", name))
 	log(string.format("Source: %d lines, Dest: %d lines", #src_lines, #dst_lines))
 	log(string.format("Functions: %d, Vars/function: %d", num_functions, vars_per_function))
-	log(string.format("Changes: %d swaps, %d updates", changes.swaps or 0, changes.updates or 0))
+	log(string.format("Changes: %d swaps, %d updates, %d renames", changes.swaps or 0, changes.updates or 0, changes.renames or 0))
 
 	-- Create buffers
 	local src_buf = vim.api.nvim_create_buf(false, true)
@@ -122,18 +142,24 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 
 	-- Generate actions
 	local start_actions = vim.loop.hrtime()
-	local actions, action_timings = core.generate_actions(src_root, dst_root, mappings, src_info, dst_info, { timings = true })
+	local actions, action_timings = core.generate_actions(src_root, dst_root, mappings, src_info, dst_info, {
+		timings = true,
+		src_buf = src_buf,
+		dst_buf = dst_buf,
+	})
 	local actions_time = (vim.loop.hrtime() - start_actions) / 1e6
 
 	local total_time = (vim.loop.hrtime() - start_total) / 1e6
 
 	-- Count actions
-	local move_count, update_count, delete_count, insert_count = 0, 0, 0, 0
+	local move_count, update_count, delete_count, insert_count, rename_count = 0, 0, 0, 0, 0
 	for _, action in ipairs(actions) do
 		if action.type == "move" then
 			move_count = move_count + 1
 		elseif action.type == "update" then
 			update_count = update_count + 1
+		elseif action.type == "rename" then
+			rename_count = rename_count + 1
 		elseif action.type == "delete" then
 			delete_count = delete_count + 1
 		elseif action.type == "insert" then
@@ -150,6 +176,7 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 		log(string.format("    Prep:      %8.2f ms", action_timings.precompute or 0))
 		log(string.format("    Updates:   %8.2f ms", action_timings.updates or 0))
 		log(string.format("    Moves:     %8.2f ms", action_timings.moves or 0))
+		log(string.format("    Renames:   %8.2f ms", action_timings.renames or 0))
 		log(string.format("    Deletes:   %8.2f ms", action_timings.deletes or 0))
 		log(string.format("    Inserts:   %8.2f ms", action_timings.inserts or 0))
 	end
@@ -159,9 +186,10 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 	log(string.format("  Mappings: %d", #mappings))
 	log(
 		string.format(
-			"  Actions: %d (moves=%d, updates=%d, deletes=%d, inserts=%d)",
+			"  Actions: %d (moves=%d, renames=%d, updates=%d, deletes=%d, inserts=%d)",
 			#actions,
 			move_count,
+			rename_count,
 			update_count,
 			delete_count,
 			insert_count
@@ -194,15 +222,15 @@ local results = {}
 
 -- Test cases: (name, functions, vars_per_func, {swaps, updates})
 local test_cases = {
-	{ "~100 lines", 10, 5, { swaps = 2, updates = 2 } },
-	{ "~250 lines", 25, 5, { swaps = 5, updates = 5 } },
-	{ "~500 lines", 50, 5, { swaps = 10, updates = 10 } },
-	{ "~750 lines", 75, 5, { swaps = 15, updates = 15 } },
-	{ "~1000 lines", 100, 5, { swaps = 20, updates = 20 } },
-	{ "~2500 lines", 280, 5, { swaps = 50, updates = 50 } },
-	{ "~5000 lines", 560, 5, { swaps = 100, updates = 100 } },
-	{ "~7500 lines", 840, 5, { swaps = 150, updates = 150 } },
-	{ "~10000 lines", 1120, 5, { swaps = 200, updates = 200 } },
+	{ "~100 lines", 10, 5, { swaps = 2, updates = 2, renames = 2 } },
+	{ "~250 lines", 25, 5, { swaps = 5, updates = 5, renames = 5 } },
+	{ "~500 lines", 50, 5, { swaps = 10, updates = 10, renames = 10 } },
+	{ "~750 lines", 75, 5, { swaps = 15, updates = 15, renames = 15 } },
+	{ "~1000 lines", 100, 5, { swaps = 20, updates = 20, renames = 20 } },
+	{ "~2500 lines", 280, 5, { swaps = 50, updates = 50, renames = 50 } },
+	{ "~5000 lines", 560, 5, { swaps = 100, updates = 100, renames = 100 } },
+	{ "~7500 lines", 840, 5, { swaps = 150, updates = 150, renames = 150 } },
+	{ "~10000 lines", 1120, 5, { swaps = 200, updates = 200, renames = 200 } },
 }
 
 for _, tc in ipairs(test_cases) do
