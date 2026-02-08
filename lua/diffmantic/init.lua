@@ -86,7 +86,10 @@ function M.diff(args)
 	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2)
 	-- debug_utils.print_recovery_mappings(mappings, before_recovery, src_info, dst_info, buf1, buf2)
 
-	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info)
+	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info, {
+		src_buf = buf1,
+		dst_buf = buf2,
+	})
 
 	-- debug_utils.print_actions(actions, buf1, buf2)
 	-- debug_utils.print_mappings(mappings, src_info, dst_info, buf1, buf2)

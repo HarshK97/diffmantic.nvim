@@ -1,4 +1,5 @@
 local M = {}
+local semantic = require("diffmantic.core.semantic")
 
 -- Generate edit actions from node mappings
 -- Actions describe what changed: insert, delete, update, move
@@ -25,6 +26,31 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			return
 		end
 		timings[key] = (hrtime() - started_at) / 1e6
+	end
+
+	local function enrich_update_actions_with_semantics(actions_list)
+		local src_buf = opts and opts.src_buf or nil
+		local dst_buf = opts and opts.dst_buf or nil
+		if not src_buf or not dst_buf then
+			return
+		end
+
+		for _, action in ipairs(actions_list) do
+			if action.type == "update" and action.node and action.target then
+				local leaf_changes = semantic.find_leaf_changes(action.node, action.target, src_buf, dst_buf)
+				local rename_pairs = {}
+				for _, change in ipairs(leaf_changes) do
+					if semantic.is_rename_identifier(change.src_node) or semantic.is_rename_identifier(change.dst_node) then
+						rename_pairs[change.src_text] = change.dst_text
+					end
+				end
+
+				action.semantic = {
+					leaf_changes = leaf_changes,
+					rename_pairs = rename_pairs,
+				}
+			end
+		end
 	end
 
 	-- Build O(1) lookup tables
@@ -283,6 +309,10 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 	end
 	stop_timer(inserts_start, "inserts")
+
+	local semantic_start = start_timer()
+	enrich_update_actions_with_semantics(actions)
+	stop_timer(semantic_start, "semantic")
 
 	return actions, timings
 end
