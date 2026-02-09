@@ -16,6 +16,39 @@ local function range_metadata(node)
 	}
 end
 
+local function build_action(action_type, src_node, dst_node, extra)
+	local src_range = range_metadata(src_node)
+	local dst_range = range_metadata(dst_node)
+
+	local action = {
+		type = action_type,
+		kind = action_type,
+		node = src_node or dst_node,
+		target = (src_node and dst_node) and dst_node or nil,
+		src_node = src_node,
+		dst_node = dst_node,
+		src_range = src_range,
+		dst_range = dst_range,
+		lines = {
+			from_line = src_range and src_range.start_line or nil,
+			to_line = dst_range and dst_range.start_line or nil,
+		},
+	}
+
+	if extra then
+		for key, value in pairs(extra) do
+			action[key] = value
+		end
+	end
+
+	return action
+end
+
+	local function action_node_type(action)
+		local node = action.src_node or action.dst_node
+		return node and node:type() or nil
+	end
+
 -- Generate edit actions from node mappings
 -- Actions describe what changed: insert, delete, update, move, rename
 function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, opts)
@@ -51,8 +84,10 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 
 		for _, action in ipairs(actions_list) do
-			if action.type == "update" and action.node and action.target then
-				local leaf_changes = semantic.find_leaf_changes(action.node, action.target, src_buf, dst_buf)
+			local src_node = action.src_node or action.node
+			local dst_node = action.dst_node or action.target
+			if action.type == "update" and src_node and dst_node then
+				local leaf_changes = semantic.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
 				local rename_pairs = {}
 				for _, change in ipairs(leaf_changes) do
 					if semantic.is_rename_identifier(change.src_node) or semantic.is_rename_identifier(change.dst_node) then
@@ -89,19 +124,14 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 
 							if not seen[key] then
 								seen[key] = true
-								table.insert(renames, {
-									type = "rename",
-									node = src_node,
-									target = dst_node,
+								table.insert(renames, build_action("rename", src_node, dst_node, {
 									from = change.src_text,
 									to = change.dst_text,
-									src_range = range_metadata(src_node),
-									dst_range = range_metadata(dst_node),
 									context = {
 										src_parent_type = action.node and action.node:type() or nil,
 										dst_parent_type = action.target and action.target:type() or nil,
 									},
-								})
+								}))
 							end
 						end
 					end
@@ -255,7 +285,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 
 		if nodes_with_changes[m.src] and significant_types[s.type] then
 			if not src_has_updated_sig_ancestor[m.src] then
-				table.insert(actions, { type = "update", node = s.node, target = d.node })
+				table.insert(actions, build_action("update", s.node, d.node))
 			end
 		end
 	end
@@ -342,7 +372,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 				local s = src_info[pair.src_id]
 				local d = dst_info[pair.dst_id]
 				if s and d then
-					table.insert(actions, { type = "move", node = s.node, target = d.node })
+					table.insert(actions, build_action("move", s.node, d.node))
 				end
 			end
 		end
@@ -354,7 +384,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	for id, info in pairs(src_info) do
 		if not src_to_dst[id] and significant_types[info.type] then
 			if not src_has_unmapped_sig_ancestor[id] then
-				table.insert(actions, { type = "delete", node = info.node })
+				table.insert(actions, build_action("delete", info.node, nil))
 			end
 		end
 	end
@@ -365,7 +395,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	for id, info in pairs(dst_info) do
 		if not dst_to_src[id] and significant_types[info.type] then
 			if not dst_has_unmapped_sig_ancestor[id] then
-				table.insert(actions, { type = "insert", node = info.node })
+				table.insert(actions, build_action("insert", nil, info.node))
 			end
 		end
 	end
