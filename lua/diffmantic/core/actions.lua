@@ -44,10 +44,77 @@ local function build_action(action_type, src_node, dst_node, extra)
 	return action
 end
 
+local function build_summary(actions_list)
+	local summary = {
+		counts = {
+			move = 0,
+			rename = 0,
+			update = 0,
+			insert = 0,
+			delete = 0,
+			total = #actions_list,
+		},
+		moves = {},
+		renames = {},
+		updates = {},
+		inserts = {},
+		deletes = {},
+	}
+
 	local function action_node_type(action)
 		local node = action.src_node or action.dst_node
 		return node and node:type() or nil
 	end
+
+	for _, action in ipairs(actions_list) do
+		local t = action.type
+		if summary.counts[t] ~= nil then
+			summary.counts[t] = summary.counts[t] + 1
+		end
+
+		if t == "move" then
+			table.insert(summary.moves, {
+				node_type = action_node_type(action),
+				from_line = action.lines and action.lines.from_line or nil,
+				to_line = action.lines and action.lines.to_line or nil,
+				src_range = action.src_range,
+				dst_range = action.dst_range,
+			})
+		elseif t == "rename" then
+			table.insert(summary.renames, {
+				node_type = action_node_type(action),
+				from = action.from,
+				to = action.to,
+				from_line = action.lines and action.lines.from_line or nil,
+				to_line = action.lines and action.lines.to_line or nil,
+				src_range = action.src_range,
+				dst_range = action.dst_range,
+			})
+		elseif t == "update" then
+			table.insert(summary.updates, {
+				node_type = action_node_type(action),
+				from_line = action.lines and action.lines.from_line or nil,
+				to_line = action.lines and action.lines.to_line or nil,
+				src_range = action.src_range,
+				dst_range = action.dst_range,
+			})
+		elseif t == "insert" then
+			table.insert(summary.inserts, {
+				node_type = action_node_type(action),
+				line = action.lines and action.lines.to_line or nil,
+				dst_range = action.dst_range,
+			})
+		elseif t == "delete" then
+			table.insert(summary.deletes, {
+				node_type = action_node_type(action),
+				line = action.lines and action.lines.from_line or nil,
+				src_range = action.src_range,
+			})
+		end
+	end
+
+	return summary
+end
 
 -- Generate edit actions from node mappings
 -- Actions describe what changed: insert, delete, update, move, rename
@@ -409,7 +476,11 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	emit_rename_actions(actions)
 	stop_timer(rename_start, "renames")
 
-	return actions, timings
+	local summary_start = start_timer()
+	local summary = build_summary(actions)
+	stop_timer(summary_start, "summary")
+
+	return actions, timings, summary
 end
 
 return M
