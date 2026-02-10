@@ -120,7 +120,7 @@ function M.has_kind(node, index, kind)
 	end
 
 	for _, capture in ipairs(captures) do
-		if M.has_capture(node, index, capture) or M.find_descendant_with_capture(node, index, capture) then
+		if M.has_capture(node, index, capture) then
 			return true
 		end
 	end
