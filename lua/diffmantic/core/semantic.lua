@@ -1,4 +1,5 @@
 local M = {}
+local roles = require("diffmantic.core.roles")
 
 -- Leaf-level diffs for small updates; otherwise return empty.
 function M.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
@@ -78,9 +79,13 @@ function M.node_in_field(parent, field_name, node)
 	return false
 end
 
-function M.is_rename_identifier(node)
+function M.is_rename_identifier(node, role_index)
 	if not node then
 		return false
+	end
+
+	if role_index and roles.has_kind(node, role_index, "rename_identifier") then
+		return true
 	end
 
 	local node_type = node:type()

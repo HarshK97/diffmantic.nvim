@@ -1,5 +1,6 @@
 local M = {}
 local semantic = require("diffmantic.core.semantic")
+local roles = require("diffmantic.core.roles")
 
 local function range_metadata(node)
 	if not node then
@@ -129,6 +130,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 	end
 
+	local src_role_index = nil
+	local dst_role_index = nil
+
 	local function start_timer()
 		if not hrtime then
 			return nil
@@ -157,7 +161,10 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 				local leaf_changes = semantic.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
 				local rename_pairs = {}
 				for _, change in ipairs(leaf_changes) do
-					if semantic.is_rename_identifier(change.src_node) or semantic.is_rename_identifier(change.dst_node) then
+					if
+						semantic.is_rename_identifier(change.src_node, src_role_index)
+						or semantic.is_rename_identifier(change.dst_node, dst_role_index)
+					then
 						rename_pairs[change.src_text] = change.dst_text
 					end
 				end
@@ -180,7 +187,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 					local src_node = change.src_node
 					local dst_node = change.dst_node
 					if src_node and dst_node and change.src_text ~= change.dst_text then
-						local is_rename = semantic.is_rename_identifier(src_node) or semantic.is_rename_identifier(dst_node)
+						local is_rename = semantic.is_rename_identifier(src_node, src_role_index)
+							or semantic.is_rename_identifier(dst_node, dst_role_index)
 						if is_rename then
 							local key = table.concat({
 								tostring(src_node:id()),
@@ -219,6 +227,15 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		src_to_dst[m.src] = m.dst
 		dst_to_src[m.dst] = m.src
 	end
+
+	local roles_start = start_timer()
+	local src_buf = opts and opts.src_buf or nil
+	local dst_buf = opts and opts.dst_buf or nil
+	if src_buf and dst_buf then
+		src_role_index = roles.build_index(src_root, src_buf)
+		dst_role_index = roles.build_index(dst_root, dst_buf)
+	end
+	stop_timer(roles_start, "roles")
 
 	local significant_types = {
 		function_declaration = true,
@@ -264,6 +281,39 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		struct_specifier = true,
 	}
 
+	local function has_kind(node, index, kind)
+		return index and roles.has_kind(node, index, kind) or false
+	end
+
+	local function is_significant(info, index)
+		local node = info.node
+		if has_kind(node, index, "function")
+			or has_kind(node, index, "class")
+			or has_kind(node, index, "variable")
+			or has_kind(node, index, "assignment")
+			or has_kind(node, index, "import")
+			or has_kind(node, index, "return")
+			or has_kind(node, index, "preproc")
+		then
+			return true
+		end
+		return significant_types[info.type] or false
+	end
+
+	local function is_transparent_update_ancestor(info, index)
+		if has_kind(info.node, index, "class") then
+			return true
+		end
+		return transparent_update_ancestors[info.type] or false
+	end
+
+	local function is_movable(info, index)
+		if has_kind(info.node, index, "function") or has_kind(info.node, index, "class") then
+			return true
+		end
+		return movable_types[info.type] or false
+	end
+
 	-- Helper: check if node or any descendant has different content
 	local function has_content_change(src_node, dst_node)
 		local src_info_data = src_info[src_node:id()]
@@ -292,7 +342,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			local p_id = current:id()
 			local p_info = src_info[p_id]
 			if p_info then
-				if not src_to_dst[p_id] and significant_types[p_info.type] then
+				if not src_to_dst[p_id] and is_significant(p_info, src_role_index) then
 					src_has_unmapped_sig_ancestor[id] = true
 					break
 				end
@@ -311,7 +361,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			local p_id = current:id()
 			local p_info = dst_info[p_id]
 			if p_info then
-				if not dst_to_src[p_id] and significant_types[p_info.type] then
+				if not dst_to_src[p_id] and is_significant(p_info, dst_role_index) then
 					dst_has_unmapped_sig_ancestor[id] = true
 					break
 				end
@@ -330,9 +380,10 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			local p_id = current:id()
 			local p_info = src_info[p_id]
 			if p_info then
-				if nodes_with_changes[p_id]
-					and significant_types[p_info.type]
-					and not transparent_update_ancestors[p_info.type]
+				if
+					nodes_with_changes[p_id]
+					and is_significant(p_info, src_role_index)
+					and not is_transparent_update_ancestor(p_info, src_role_index)
 				then
 					src_has_updated_sig_ancestor[id] = true
 					break
@@ -350,7 +401,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	for _, m in ipairs(mappings) do
 		local s, d = src_info[m.src], dst_info[m.dst]
 
-		if nodes_with_changes[m.src] and significant_types[s.type] then
+		if nodes_with_changes[m.src] and is_significant(s, src_role_index) then
 			if not src_has_updated_sig_ancestor[m.src] then
 				table.insert(actions, build_action("update", s.node, d.node))
 			end
@@ -364,7 +415,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	local movable_pairs = {} 
 	for _, m in ipairs(mappings) do
 		local s = src_info[m.src]
-		if s and movable_types[s.type] then
+		if s and is_movable(s, src_role_index) then
 			local src_parent_is_root = s.parent and s.parent:id() == src_root:id()
 			local d = dst_info[m.dst]
 			local dst_parent_is_root = d and d.parent and d.parent:id() == dst_root:id()
@@ -449,7 +500,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	-- DELETES: unmapped source nodes
 	local deletes_start = start_timer()
 	for id, info in pairs(src_info) do
-		if not src_to_dst[id] and significant_types[info.type] then
+		if not src_to_dst[id] and is_significant(info, src_role_index) then
 			if not src_has_unmapped_sig_ancestor[id] then
 				table.insert(actions, build_action("delete", info.node, nil))
 			end
@@ -460,7 +511,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	-- INSERTS: unmapped destination nodes
 	local inserts_start = start_timer()
 	for id, info in pairs(dst_info) do
-		if not dst_to_src[id] and significant_types[info.type] then
+		if not dst_to_src[id] and is_significant(info, dst_role_index) then
 			if not dst_has_unmapped_sig_ancestor[id] then
 				table.insert(actions, build_action("insert", nil, info.node))
 			end

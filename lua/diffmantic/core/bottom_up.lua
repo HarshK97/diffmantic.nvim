@@ -1,8 +1,12 @@
 local M = {}
+local roles = require("diffmantic.core.roles")
 
 -- Bottom-up matching: match nodes from leaves up, using parent mappings
 -- Tries to match nodes with the same type and label, and optionally name
 function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src_buf, dst_buf)
+	local src_role_index = roles.build_index(src_root, src_buf)
+	local dst_role_index = roles.build_index(dst_root, dst_buf)
+
 	-- Build O(1) lookup tables
 	local src_to_dst = {}
 	local dst_to_src = {}
@@ -12,7 +16,22 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 	end
 
 	-- Get the name of a declaration node (function or variable)
-	local function get_declaration_name(node, bufnr)
+	local function get_declaration_name(node, bufnr, role_index)
+		local function_name = roles.get_kind_name_text(node, role_index, bufnr, "function")
+		if function_name and #function_name > 0 then
+			return function_name
+		end
+
+		local class_name = roles.get_kind_name_text(node, role_index, bufnr, "class")
+		if class_name and #class_name > 0 then
+			return class_name
+		end
+
+		local variable_name = roles.get_kind_name_text(node, role_index, bufnr, "variable")
+		if variable_name and #variable_name > 0 then
+			return variable_name
+		end
+
 		if node:type() == "class_specifier" or node:type() == "struct_specifier" or node:type() == "enum_specifier" or node:type() == "union_specifier" then
 			local name_node = node:field("name")[1] or node:field("tag")[1]
 			if name_node then
@@ -240,6 +259,24 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 		struct_specifier = true,
 	}
 
+	local function is_identifier_type(info, role_index)
+		if roles.has_kind(info.node, role_index, "function")
+			or roles.has_kind(info.node, role_index, "class")
+			or roles.has_kind(info.node, role_index, "variable")
+			or roles.has_kind(info.node, role_index, "assignment")
+		then
+			return true
+		end
+		return identifier_types[info.type] or false
+	end
+
+	local function is_unique_structure_fallback_type(info, role_index)
+		if roles.has_kind(info.node, role_index, "function") or roles.has_kind(info.node, role_index, "class") then
+			return true
+		end
+		return unique_structure_fallback_types[info.type] or false
+	end
+
 	-- Try to match unmapped nodes whose parent is mapped
 	for id, info in pairs(src_info) do
 		if not src_to_dst[id] then
@@ -277,8 +314,8 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 				end
 
 				local src_name = nil
-				if identifier_types[info.type] then
-					src_name = get_declaration_name(info.node, src_buf)
+				if is_identifier_type(info, src_role_index) then
+					src_name = get_declaration_name(info.node, src_buf, src_role_index)
 				end
 				local src_value_hash = get_assignment_value_hash(info.node, src_info)
 
@@ -290,7 +327,7 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 					local d_info = dst_info[cand:id()]
 					if d_info.type == info.type and d_info.label == info.label then
 						if src_name then
-							local dst_name = get_declaration_name(cand, dst_buf)
+							local dst_name = get_declaration_name(cand, dst_buf, dst_role_index)
 							if src_name == dst_name then
 								table.insert(mappings, { src = id, dst = cand:id() })
 								src_to_dst[id] = cand:id()
@@ -330,7 +367,7 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 					table.insert(mappings, { src = id, dst = rename_candidate })
 					src_to_dst[id] = rename_candidate
 					dst_to_src[rename_candidate] = id
-				elseif not src_to_dst[id] and unique_structure_fallback_types[info.type] then
+				elseif not src_to_dst[id] and is_unique_structure_fallback_type(info, src_role_index) then
 					if #structure_candidates == 1 then
 						local candidate_id = structure_candidates[1]
 						table.insert(mappings, { src = id, dst = candidate_id })
