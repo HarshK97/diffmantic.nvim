@@ -27,4 +27,18 @@
 (preproc_def) @diff.preproc.outer
 (preproc_function_def) @diff.preproc.outer
 
-[(identifier) (field_identifier) (type_identifier)] @diff.identifier.rename
+(function_definition
+  declarator: (function_declarator
+    declarator: (identifier) @diff.identifier.rename))
+
+(struct_specifier
+  name: (type_identifier) @diff.identifier.rename)
+
+(union_specifier
+  name: (type_identifier) @diff.identifier.rename)
+
+(enum_specifier
+  name: (type_identifier) @diff.identifier.rename)
+
+(init_declarator
+  declarator: [(identifier) (field_identifier)] @diff.identifier.rename)

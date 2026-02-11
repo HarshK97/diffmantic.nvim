@@ -20,4 +20,14 @@
 (import_statement) @diff.import.outer
 (return_statement) @diff.return.outer
 
-[(identifier) (property_identifier) (type_identifier)] @diff.identifier.rename
+(function_declaration
+  name: (identifier) @diff.identifier.rename)
+
+(method_definition
+  name: (property_identifier) @diff.identifier.rename)
+
+(class_declaration
+  name: (type_identifier) @diff.identifier.rename)
+
+(variable_declarator
+  name: (identifier) @diff.identifier.rename)

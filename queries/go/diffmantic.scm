@@ -25,4 +25,19 @@
 (import_declaration) @diff.import.outer
 (return_statement) @diff.return.outer
 
-[(identifier) (field_identifier) (type_identifier)] @diff.identifier.rename
+(function_declaration
+  name: (identifier) @diff.identifier.rename)
+
+(method_declaration
+  name: (field_identifier) @diff.identifier.rename)
+
+(type_declaration
+  (type_spec
+    name: (type_identifier) @diff.identifier.rename))
+
+(var_declaration
+  (var_spec
+    name: (identifier) @diff.identifier.rename))
+
+(short_var_declaration
+  left: (expression_list (identifier) @diff.identifier.rename))

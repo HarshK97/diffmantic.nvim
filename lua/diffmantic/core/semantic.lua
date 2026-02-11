@@ -141,7 +141,9 @@ function M.is_rename_identifier(node, role_index)
 			return true
 		end
 		if ptype == "field" then
-			return true
+			if M.node_in_field(parent, "name", current) or M.node_in_field(parent, "key", current) then
+				return true
+			end
 		end
 		current = parent
 		parent = parent:parent()

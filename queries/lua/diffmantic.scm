@@ -19,4 +19,17 @@
 
 (return_statement) @diff.return.outer
 
-(identifier) @diff.identifier.rename
+(function_declaration
+  name: (identifier) @diff.identifier.rename)
+
+(variable_declaration
+  (assignment_statement
+    (variable_list name: (identifier) @diff.identifier.rename)
+    (expression_list)))
+
+(assignment_statement
+  (variable_list name: (identifier) @diff.identifier.rename)
+  (expression_list))
+
+(field
+  name: (identifier) @diff.identifier.rename)

@@ -14,4 +14,11 @@
 (import_from_statement) @diff.import.outer
 (return_statement) @diff.return.outer
 
-(identifier) @diff.identifier.rename
+(function_definition
+  name: (identifier) @diff.identifier.rename)
+
+(class_definition
+  name: (identifier) @diff.identifier.rename)
+
+(assignment
+  left: (identifier) @diff.identifier.rename)
