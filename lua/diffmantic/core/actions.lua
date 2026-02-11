@@ -1,6 +1,7 @@
 local M = {}
 local semantic = require("diffmantic.core.semantic")
 local roles = require("diffmantic.core.roles")
+local payload = require("diffmantic.core.payload")
 
 local function range_metadata(node)
 	if not node then
@@ -50,6 +51,7 @@ local function build_summary(actions_list)
 		counts = {
 			move = 0,
 			rename = 0,
+			rename_suppressed = 0,
 			update = 0,
 			insert = 0,
 			delete = 0,
@@ -57,6 +59,7 @@ local function build_summary(actions_list)
 		},
 		moves = {},
 		renames = {},
+		suppressed_renames = {},
 		updates = {},
 		inserts = {},
 		deletes = {},
@@ -82,6 +85,10 @@ local function build_summary(actions_list)
 				dst_range = action.dst_range,
 			})
 		elseif t == "rename" then
+			local suppressed_usages = action.context and action.context.suppressed_usages or {}
+			local suppressed_count = #suppressed_usages
+			summary.counts.rename_suppressed = summary.counts.rename_suppressed + suppressed_count
+
 			table.insert(summary.renames, {
 				node_type = action_node_type(action),
 				from = action.from,
@@ -90,7 +97,25 @@ local function build_summary(actions_list)
 				to_line = action.lines and action.lines.to_line or nil,
 				src_range = action.src_range,
 				dst_range = action.dst_range,
+				suppressed_usage_count = suppressed_count,
 			})
+
+			for _, usage in ipairs(suppressed_usages) do
+				table.insert(summary.suppressed_renames, {
+					from = usage.from,
+					to = usage.to,
+					from_line = usage.lines and usage.lines.from_line or nil,
+					to_line = usage.lines and usage.lines.to_line or nil,
+					src_range = usage.src_range,
+					dst_range = usage.dst_range,
+					suppressed_by = {
+						from = action.from,
+						to = action.to,
+						from_line = action.lines and action.lines.from_line or nil,
+						to_line = action.lines and action.lines.to_line or nil,
+					},
+				})
+			end
 		elseif t == "update" then
 			table.insert(summary.updates, {
 				node_type = action_node_type(action),
@@ -180,33 +205,133 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	local function emit_rename_actions(actions_list)
 		local renames = {}
 		local seen = {}
+		local src_buf = opts and opts.src_buf or nil
+		local dst_buf = opts and opts.dst_buf or nil
+		local is_buf_available = src_buf and dst_buf
 
+		local function pair_key(from_text, to_text)
+			return tostring(from_text) .. "\x1f" .. tostring(to_text)
+		end
+
+		local function push_rename(src_node, dst_node, from_text, to_text, context)
+			if not src_node or not dst_node or not from_text or not to_text then
+				return
+			end
+			if from_text == to_text then
+				return
+			end
+			local key = table.concat({
+				tostring(src_node:id()),
+				tostring(dst_node:id()),
+				from_text,
+				to_text,
+			}, ":")
+			if seen[key] then
+				return
+			end
+			seen[key] = true
+			table.insert(renames, build_action("rename", src_node, dst_node, {
+				from = from_text,
+				to = to_text,
+				context = context,
+			}))
+		end
+
+		local function is_decl_rename(src_node, dst_node)
+			return semantic.is_rename_identifier(src_node, src_role_index)
+				and semantic.is_rename_identifier(dst_node, dst_role_index)
+		end
+
+		local seed_pairs = {}
+		local function add_seed(from_text, to_text)
+			if from_text and to_text and from_text ~= to_text then
+				seed_pairs[pair_key(from_text, to_text)] = true
+			end
+		end
+
+		local function collect_param_identifiers(node, bufnr)
+			if not node or not bufnr then
+				return {}
+			end
+
+			local parameter_kinds = {
+				parameters = true,
+				parameter_list = true,
+				formal_parameters = true,
+			}
+
+			local function find_parameter_node(n)
+				if parameter_kinds[n:type()] then
+					return n
+				end
+				for child in n:iter_children() do
+					local found = find_parameter_node(child)
+					if found then
+						return found
+					end
+				end
+				return nil
+			end
+
+			local params_root = find_parameter_node(node)
+			if not params_root then
+				return {}
+			end
+
+			local out = {}
+			local function walk(n)
+				if n:child_count() == 0 then
+					local t = n:type()
+					if t == "identifier" or t == "type_identifier" or t == "field_identifier" or t == "property_identifier" then
+						local text = vim.treesitter.get_node_text(n, bufnr)
+						if text and text:match("^[%a_][%w_]*$") then
+							table.insert(out, { node = n, text = text })
+						end
+					end
+					return
+				end
+				for child in n:iter_children() do
+					walk(child)
+				end
+			end
+
+			walk(params_root)
+			return out
+		end
+
+		-- Pass 1a: high-confidence declaration-like rename seeds from semantic leaf changes.
 		for _, action in ipairs(actions_list) do
 			if action.type == "update" and action.semantic and action.semantic.leaf_changes then
 				for _, change in ipairs(action.semantic.leaf_changes) do
 					local src_node = change.src_node
 					local dst_node = change.dst_node
-					if src_node and dst_node and change.src_text ~= change.dst_text then
-						local is_rename = semantic.is_rename_identifier(src_node, src_role_index)
-							or semantic.is_rename_identifier(dst_node, dst_role_index)
-						if is_rename then
-							local key = table.concat({
-								tostring(src_node:id()),
-								tostring(dst_node:id()),
-								change.src_text,
-								change.dst_text,
-							}, ":")
+					if src_node and dst_node and change.src_text ~= change.dst_text and is_decl_rename(src_node, dst_node) then
+						add_seed(change.src_text, change.dst_text)
+					end
+				end
+			end
+		end
 
-							if not seen[key] then
-								seen[key] = true
-								table.insert(renames, build_action("rename", src_node, dst_node, {
-									from = change.src_text,
-									to = change.dst_text,
-									context = {
+		-- Pass 1a.2: positional parameter rename seeds/actions for updated functions.
+		if is_buf_available then
+			for _, action in ipairs(actions_list) do
+				if action.type == "update" and action.src_node and action.dst_node then
+					local src_params = collect_param_identifiers(action.src_node, src_buf)
+					local dst_params = collect_param_identifiers(action.dst_node, dst_buf)
+					if #src_params > 0 and #src_params == #dst_params and #src_params <= 16 then
+						for i = 1, #src_params do
+							local s = src_params[i]
+							local d = dst_params[i]
+							if s.text ~= d.text then
+								add_seed(s.text, d.text)
+								if is_decl_rename(s.node, d.node) then
+									push_rename(s.node, d.node, s.text, d.text, {
 										src_parent_type = action.node and action.node:type() or nil,
 										dst_parent_type = action.target and action.target:type() or nil,
-									},
-								}))
+										source = "parameter_positional",
+										declaration = true,
+									})
+								end
 							end
 						end
 					end
@@ -214,7 +339,207 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			end
 		end
 
+		-- Pass 1b: strict fallback seed collection from mapped leaf identifiers.
+		if is_buf_available then
+			local src_to_dst_local = {}
+			for _, m in ipairs(mappings) do
+				src_to_dst_local[m.src] = m.dst
+			end
+
+			local function child_index(node)
+				local parent = node and node:parent() or nil
+				if not parent then
+					return -1
+				end
+				local idx = 0
+				for child in parent:iter_children() do
+					if child:equal(node) then
+						return idx
+					end
+					idx = idx + 1
+				end
+				return -1
+			end
+
+			local function is_identifier_node(node)
+				if not node then
+					return false
+				end
+				local t = node:type()
+				return t == "identifier" or t == "type_identifier" or t == "field_identifier" or t == "property_identifier"
+			end
+
+			local function is_identifier_like(text)
+				return text and text:match("^[%a_][%w_]*$") ~= nil
+			end
+
+			for _, m in ipairs(mappings) do
+				local s = src_info[m.src]
+				local d = dst_info[m.dst]
+				if s and d and s.node and d.node then
+					local src_node = s.node
+					local dst_node = d.node
+					if src_node:child_count() == 0 and dst_node:child_count() == 0 then
+						local src_parent = src_node:parent()
+						local dst_parent = dst_node:parent()
+						if src_parent and dst_parent and src_to_dst_local[src_parent:id()] == dst_parent:id() then
+							if src_parent:type() == dst_parent:type() and child_index(src_node) == child_index(dst_node) then
+								local src_text = vim.treesitter.get_node_text(src_node, src_buf)
+								local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
+								if src_text and dst_text and src_text ~= dst_text then
+									if
+										is_decl_rename(src_node, dst_node)
+										and is_identifier_node(src_node)
+										and is_identifier_node(dst_node)
+										and is_identifier_like(src_text)
+										and is_identifier_like(dst_text)
+									then
+										add_seed(src_text, dst_text)
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		-- Pass 2: emit leaf rename actions gated by seeds (and declaration renames).
+		for _, action in ipairs(actions_list) do
+			if action.type == "update" and action.semantic and action.semantic.leaf_changes then
+				for _, change in ipairs(action.semantic.leaf_changes) do
+					local src_node = change.src_node
+					local dst_node = change.dst_node
+					local src_text = change.src_text
+					local dst_text = change.dst_text
+					if src_node and dst_node and src_text and dst_text and src_text ~= dst_text then
+						local is_decl = is_decl_rename(src_node, dst_node)
+						local key = pair_key(src_text, dst_text)
+						if seed_pairs[key] or is_decl then
+							push_rename(src_node, dst_node, src_text, dst_text, {
+								src_parent_type = action.node and action.node:type() or nil,
+								dst_parent_type = action.target and action.target:type() or nil,
+								declaration = is_decl,
+							})
+						end
+					end
+				end
+			end
+		end
+
+		-- Pass 3: emit strict mapped-leaf rename actions for seed pairs not present in leaf_changes.
+		if is_buf_available then
+			local src_to_dst_local = {}
+			for _, m in ipairs(mappings) do
+				src_to_dst_local[m.src] = m.dst
+			end
+
+			local function child_index(node)
+				local parent = node and node:parent() or nil
+				if not parent then
+					return -1
+				end
+				local idx = 0
+				for child in parent:iter_children() do
+					if child:equal(node) then
+						return idx
+					end
+					idx = idx + 1
+				end
+				return -1
+			end
+
+			local function is_identifier_node(node)
+				if not node then
+					return false
+				end
+				local t = node:type()
+				return t == "identifier" or t == "type_identifier" or t == "field_identifier" or t == "property_identifier"
+			end
+
+			local function is_identifier_like(text)
+				return text and text:match("^[%a_][%w_]*$") ~= nil
+			end
+
+			for _, m in ipairs(mappings) do
+				local s = src_info[m.src]
+				local d = dst_info[m.dst]
+				if s and d and s.node and d.node then
+					local src_node = s.node
+					local dst_node = d.node
+					if src_node:child_count() == 0 and dst_node:child_count() == 0 then
+						local src_parent = src_node:parent()
+						local dst_parent = dst_node:parent()
+						if src_parent and dst_parent and src_to_dst_local[src_parent:id()] == dst_parent:id() then
+							if src_parent:type() == dst_parent:type() and child_index(src_node) == child_index(dst_node) then
+								local src_text = vim.treesitter.get_node_text(src_node, src_buf)
+								local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
+								if src_text and dst_text and src_text ~= dst_text then
+									if
+										is_decl_rename(src_node, dst_node)
+										and is_identifier_node(src_node)
+										and is_identifier_node(dst_node)
+										and is_identifier_like(src_text)
+										and is_identifier_like(dst_text)
+									then
+										local key = pair_key(src_text, dst_text)
+										if seed_pairs[key] then
+											push_rename(src_node, dst_node, src_text, dst_text, {
+												src_parent_type = src_parent:type(),
+												dst_parent_type = dst_parent:type(),
+												source = "mapping_seed",
+												declaration = true,
+											})
+										end
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		-- If a declaration rename exists for a pair, suppress usage-level duplicates for that pair.
+		local declaration_pairs = {}
 		for _, rename_action in ipairs(renames) do
+			if rename_action.context and rename_action.context.declaration then
+				declaration_pairs[pair_key(rename_action.from, rename_action.to)] = true
+			end
+		end
+
+		local suppressed_by_pair = {}
+		local filtered_renames = {}
+		for _, rename_action in ipairs(renames) do
+			local key = pair_key(rename_action.from, rename_action.to)
+			local is_declaration = rename_action.context and rename_action.context.declaration
+			if not declaration_pairs[key] or is_declaration then
+				table.insert(filtered_renames, rename_action)
+			else
+				suppressed_by_pair[key] = suppressed_by_pair[key] or {}
+				table.insert(suppressed_by_pair[key], {
+					from = rename_action.from,
+					to = rename_action.to,
+					src_range = rename_action.src_range,
+					dst_range = rename_action.dst_range,
+					lines = rename_action.lines,
+					context = rename_action.context,
+				})
+			end
+		end
+
+		for _, rename_action in ipairs(filtered_renames) do
+			if rename_action.context and rename_action.context.declaration then
+				local key = pair_key(rename_action.from, rename_action.to)
+				local suppressed_usages = suppressed_by_pair[key]
+				if suppressed_usages and #suppressed_usages > 0 then
+					rename_action.context.suppressed_usages = suppressed_usages
+					rename_action.context.suppressed_usage_count = #suppressed_usages
+				end
+			end
+		end
+
+		for _, rename_action in ipairs(filtered_renames) do
 			table.insert(actions_list, rename_action)
 		end
 	end
@@ -253,7 +578,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		assignment_statement = true,
 		for_statement = true,
 		while_statement = true,
-		function_call = true,
 		-- Python
 		class_definition = true,
 		import_statement = true,
@@ -526,6 +850,15 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	local rename_start = start_timer()
 	emit_rename_actions(actions)
 	stop_timer(rename_start, "renames")
+
+	local render_start = start_timer()
+	if src_buf and dst_buf then
+		payload.enrich(actions, {
+			src_buf = src_buf,
+			dst_buf = dst_buf,
+		})
+	end
+	stop_timer(render_start, "payload")
 
 	local summary_start = start_timer()
 	local summary = build_summary(actions)
