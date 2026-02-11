@@ -1,6 +1,29 @@
 local M = {}
 local roles = require("diffmantic.core.roles")
 
+local function node_key(node)
+	local sr, sc, er, ec = node:range()
+	return sr, sc, er, ec
+end
+
+local function compare_info_order(a_info, b_info)
+	local asr, asc, aer, aec = node_key(a_info.node)
+	local bsr, bsc, ber, bec = node_key(b_info.node)
+	if asr ~= bsr then
+		return asr < bsr
+	end
+	if asc ~= bsc then
+		return asc < bsc
+	end
+	if aer ~= ber then
+		return aer < ber
+	end
+	if aec ~= bec then
+		return aec < bec
+	end
+	return a_info.type < b_info.type
+end
+
 -- Bottom-up matching: match nodes from leaves up, using parent mappings
 -- Tries to match nodes with the same type and label, and optionally name
 function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src_buf, dst_buf)
@@ -277,8 +300,22 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 		return unique_structure_fallback_types[info.type] or false
 	end
 
+	local src_ids = {}
+	for id in pairs(src_info) do
+		table.insert(src_ids, id)
+	end
+	table.sort(src_ids, function(a, b)
+		local ah = src_info[a].height or 0
+		local bh = src_info[b].height or 0
+		if ah == bh then
+			return compare_info_order(src_info[a], src_info[b])
+		end
+		return ah < bh
+	end)
+
 	-- Try to match unmapped nodes whose parent is mapped
-	for id, info in pairs(src_info) do
+	for _, id in ipairs(src_ids) do
+		local info = src_info[id]
 		if not src_to_dst[id] then
 			local parent = info.parent
 			local parent_mapped = false

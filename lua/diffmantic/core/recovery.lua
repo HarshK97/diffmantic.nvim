@@ -1,5 +1,28 @@
 local M = {}
 
+local function node_key(node)
+	local sr, sc, er, ec = node:range()
+	return sr, sc, er, ec
+end
+
+local function compare_info_order(a_info, b_info)
+	local asr, asc, aer, aec = node_key(a_info.node)
+	local bsr, bsc, ber, bec = node_key(b_info.node)
+	if asr ~= bsr then
+		return asr < bsr
+	end
+	if asc ~= bsc then
+		return asc < bsc
+	end
+	if aer ~= ber then
+		return aer < ber
+	end
+	if aec ~= bec then
+		return aec < bec
+	end
+	return a_info.type < b_info.type
+end
+
 -- Recovery matching: tries to match remaining unmapped nodes using LCS and unique type
 function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf)
 	-- Build O(1) lookup tables
@@ -140,7 +163,16 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 	end
 
 	-- Apply recovery to all mapped nodes
-	for id, info in pairs(src_info) do
+	local src_ids = {}
+	for id in pairs(src_info) do
+		table.insert(src_ids, id)
+	end
+	table.sort(src_ids, function(a, b)
+		return compare_info_order(src_info[a], src_info[b])
+	end)
+
+	for _, id in ipairs(src_ids) do
+		local info = src_info[id]
 		local dst_id = src_to_dst[id]
 		if dst_id then
 			simple_recovery(info.node, dst_info[dst_id].node)
