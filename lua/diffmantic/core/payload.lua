@@ -306,7 +306,7 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 						src_row,
 						src_base + span.start_col - 1,
 						src_base + span.end_col,
-						"DiffChangeText",
+						"DiffmanticChange",
 						src_buf
 					) or did_src
 				end
@@ -317,16 +317,16 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 						dst_row,
 						dst_base + span.start_col - 1,
 						dst_base + span.end_col,
-						"DiffChangeText",
+						"DiffmanticChange",
 						dst_buf
 					) or did_dst
 				end
 
 				if did_src then
-					append_sign(out.src_signs, src_row, "U", "DiffChangeText")
+					append_sign(out.src_signs, src_row, "U", "DiffmanticChange")
 				end
 				if did_dst then
-					append_sign(out.dst_signs, dst_row, "U", "DiffChangeText")
+					append_sign(out.dst_signs, dst_row, "U", "DiffmanticChange")
 				end
 				return did_src or did_dst
 			end
@@ -339,7 +339,7 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 					src_row,
 					src_base + fragment.old_start - 1,
 					src_base + fragment.old_end,
-					"DiffChangeText",
+					"DiffmanticChange",
 					src_buf
 				) or did
 				did = append_span(
@@ -347,11 +347,11 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 					dst_row,
 					dst_base + fragment.new_start - 1,
 					dst_base + fragment.new_end,
-					"DiffChangeText",
+					"DiffmanticChange",
 					dst_buf
 				) or did
-				append_sign(out.src_signs, src_row, "U", "DiffChangeText")
-				append_sign(out.dst_signs, dst_row, "U", "DiffChangeText")
+				append_sign(out.src_signs, src_row, "U", "DiffmanticChange")
+				append_sign(out.dst_signs, dst_row, "U", "DiffmanticChange")
 				return did
 			end
 
@@ -362,15 +362,15 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 			if only_changes then
 				return false
 			end
-			local did = mark_line_tokens(src_buf, out.src_spans, src_row, s_line, src_base, "DiffDeleteText")
-			append_sign(out.src_signs, src_row, "-", "DiffDeleteText")
+			local did = mark_line_tokens(src_buf, out.src_spans, src_row, s_line, src_base, "DiffmanticDelete")
+			append_sign(out.src_signs, src_row, "-", "DiffmanticDelete")
 			return did
 		elseif d_line and not s_line then
 			if only_changes then
 				return false
 			end
-			local did = mark_line_tokens(dst_buf, out.dst_spans, dst_row, d_line, dst_base, "DiffAddText")
-			append_sign(out.dst_signs, dst_row, "+", "DiffAddText")
+			local did = mark_line_tokens(dst_buf, out.dst_spans, dst_row, d_line, dst_base, "DiffmanticAdd")
+			append_sign(out.dst_signs, dst_row, "+", "DiffmanticAdd")
 			return did
 		end
 
@@ -398,8 +398,8 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 					local src_row = sr + start_a - 1 + i
 					local s_line = src_lines[start_a + i]
 					local src_base = base_col_for_row(src_row, sr, sc)
-					append_sign(out.src_signs, src_row, "-", "DiffDeleteText")
-					did_highlight = mark_line_tokens(src_buf, out.src_spans, src_row, s_line, src_base, "DiffDeleteText")
+					append_sign(out.src_signs, src_row, "-", "DiffmanticDelete")
+					did_highlight = mark_line_tokens(src_buf, out.src_spans, src_row, s_line, src_base, "DiffmanticDelete")
 						or did_highlight
 				end
 			end
@@ -409,8 +409,8 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 					local dst_row = tr + start_b - 1 + i
 					local d_line = dst_lines[start_b + i]
 					local dst_base = base_col_for_row(dst_row, tr, tc)
-					append_sign(out.dst_signs, dst_row, "+", "DiffAddText")
-					did_highlight = mark_line_tokens(dst_buf, out.dst_spans, dst_row, d_line, dst_base, "DiffAddText")
+					append_sign(out.dst_signs, dst_row, "+", "DiffmanticAdd")
+					did_highlight = mark_line_tokens(dst_buf, out.dst_spans, dst_row, d_line, dst_base, "DiffmanticAdd")
 						or did_highlight
 				end
 			end
@@ -449,15 +449,15 @@ local function append_change_leaf(render, src_buf, dst_buf, src_node, dst_node, 
 		local dst_start = tc + math.max(fragment.new_start - 1, 0)
 		local dst_end = tc + math.max(fragment.new_end, 0)
 
-		highlighted = append_span(render.src_spans, sr, src_start, src_end, "DiffChangeText", src_buf) or highlighted
-		highlighted = append_span(render.dst_spans, tr, dst_start, dst_end, "DiffChangeText", dst_buf) or highlighted
+		highlighted = append_span(render.src_spans, sr, src_start, src_end, "DiffmanticChange", src_buf) or highlighted
+		highlighted = append_span(render.dst_spans, tr, dst_start, dst_end, "DiffmanticChange", dst_buf) or highlighted
 	else
-		highlighted = append_node_tokens(render.src_spans, src_buf, src_node, "DiffChangeText", nil) or highlighted
-		highlighted = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffChangeText", nil) or highlighted
+		highlighted = append_node_tokens(render.src_spans, src_buf, src_node, "DiffmanticChange", nil) or highlighted
+		highlighted = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffmanticChange", nil) or highlighted
 	end
 
-	append_sign(render.src_signs, sr, "U", "DiffChangeText")
-	append_sign(render.dst_signs, tr, "U", "DiffChangeText")
+	append_sign(render.src_signs, sr, "U", "DiffmanticChange")
+	append_sign(render.dst_signs, tr, "U", "DiffmanticChange")
 
 	return highlighted
 end
@@ -506,11 +506,11 @@ function M.enrich(actions, opts)
 			local src_line = action.lines and action.lines.from_line or (sr and sr + 1 or nil)
 			local dst_line = action.lines and action.lines.to_line or (tr and tr + 1 or nil)
 
-			touched = append_node_tokens(render.src_spans, src_buf, src_node, "DiffMoveText", nil) or touched
-			touched = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffMoveText", nil) or touched
+			touched = append_node_tokens(render.src_spans, src_buf, src_node, "DiffmanticMove", nil) or touched
+			touched = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffmanticMove", nil) or touched
 
 			if sr and sc then
-				append_sign(render.src_signs, sr, "M", "DiffMoveText")
+				append_sign(render.src_signs, sr, "M", "DiffmanticMove")
 				append_virt(
 					render.src_virt,
 					sr,
@@ -522,7 +522,7 @@ function M.enrich(actions, opts)
 				touched = true
 			end
 			if tr and tc then
-				append_sign(render.dst_signs, tr, "M", "DiffMoveText")
+				append_sign(render.dst_signs, tr, "M", "DiffmanticMove")
 				append_virt(render.dst_virt, tr, tc, string.format(" ⤶ from L%d", src_line or 0), "Comment", "eol")
 				touched = true
 			end
@@ -530,16 +530,16 @@ function M.enrich(actions, opts)
 			local sr, _, _, sec = node_range(src_node)
 			local tr, _, _, tec = node_range(dst_node)
 
-			touched = append_node_tokens(render.src_spans, src_buf, src_node, "DiffRenameText", nil) or touched
-			touched = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffRenameText", nil) or touched
+			touched = append_node_tokens(render.src_spans, src_buf, src_node, "DiffmanticRename", nil) or touched
+			touched = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffmanticRename", nil) or touched
 
 			if sr and sec and action.to then
-				append_sign(render.src_signs, sr, "R", "DiffRenameText")
+				append_sign(render.src_signs, sr, "R", "DiffmanticRename")
 				append_virt(render.src_virt, sr, sec, " -> " .. action.to, "Comment", "inline")
 				touched = true
 			end
 			if tr and tec and action.from then
-				append_sign(render.dst_signs, tr, "R", "DiffRenameText")
+				append_sign(render.dst_signs, tr, "R", "DiffmanticRename")
 				append_virt(render.dst_virt, tr, tec, string.format(" (was %s)", action.from), "Comment", "inline")
 				touched = true
 			end
@@ -595,17 +595,17 @@ function M.enrich(actions, opts)
 				end
 			end
 		elseif action.type == "delete" and src_node then
-			touched = append_node_tokens(render.src_spans, src_buf, src_node, "DiffDeleteText", nil) or touched
+			touched = append_node_tokens(render.src_spans, src_buf, src_node, "DiffmanticDelete", nil) or touched
 			local sr = node_range(src_node)
 			if sr then
-				append_sign(render.src_signs, sr, "-", "DiffDeleteText")
+				append_sign(render.src_signs, sr, "-", "DiffmanticDelete")
 				touched = true
 			end
 		elseif action.type == "insert" and dst_node then
-			touched = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffAddText", nil) or touched
+			touched = append_node_tokens(render.dst_spans, dst_buf, dst_node, "DiffmanticAdd", nil) or touched
 			local tr = node_range(dst_node)
 			if tr then
-				append_sign(render.dst_signs, tr, "+", "DiffAddText")
+				append_sign(render.dst_signs, tr, "+", "DiffmanticAdd")
 				touched = true
 			end
 		end

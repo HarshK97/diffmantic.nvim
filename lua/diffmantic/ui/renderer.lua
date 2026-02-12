@@ -3,11 +3,11 @@ local signs = require("diffmantic.ui.signs")
 local M = {}
 
 local HL_PRIORITY = {
-	DiffMoveText = 10,
-	DiffAddText = 20,
-	DiffDeleteText = 20,
-	DiffChangeText = 30,
-	DiffRenameText = 40,
+	DiffmanticMove = 10,
+	DiffmanticAdd = 20,
+	DiffmanticDelete = 20,
+	DiffmanticChange = 30,
+	DiffmanticRename = 40,
 }
 
 local function set_extmark(buf, ns, row, col, opts)

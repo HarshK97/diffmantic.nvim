@@ -1,19 +1,19 @@
 local M = {}
 
 local SIGN_GROUP_BY_TEXT_GROUP = {
-	DiffAddText = "DiffAddSign",
-	DiffDeleteText = "DiffDeleteSign",
-	DiffChangeText = "DiffChangeSign",
-	DiffMoveText = "DiffMoveSign",
-	DiffRenameText = "DiffRenameSign",
+	DiffmanticAdd = "DiffmanticAddSign",
+	DiffmanticDelete = "DiffmanticDeleteSign",
+	DiffmanticChange = "DiffmanticChangeSign",
+	DiffmanticMove = "DiffmanticMoveSign",
+	DiffmanticRename = "DiffmanticRenameSign",
 }
 
 local SIGN_PRIORITY_BY_TEXT_GROUP = {
-	DiffAddText = 10,
-	DiffDeleteText = 10,
-	DiffChangeText = 20,
-	DiffMoveText = 30,
-	DiffRenameText = 40,
+	DiffmanticAdd = 10,
+	DiffmanticDelete = 10,
+	DiffmanticChange = 20,
+	DiffmanticMove = 30,
+	DiffmanticRename = 40,
 }
 
 function M.glyph()
