@@ -1,7 +1,7 @@
 local M = {}
 local semantic = require("diffmantic.core.semantic")
 local roles = require("diffmantic.core.roles")
-local payload = require("diffmantic.core.payload")
+local analysis = require("diffmantic.core.analysis")
 
 local function range_metadata(node)
 	if not node then
@@ -21,25 +21,42 @@ end
 local function build_action(action_type, src_node, dst_node, extra)
 	local src_range = range_metadata(src_node)
 	local dst_range = range_metadata(dst_node)
+	local node = src_node or dst_node
+	local from_line = src_range and src_range.start_line or nil
+	local to_line = dst_range and dst_range.start_line or nil
 
 	local action = {
 		type = action_type,
-		kind = action_type,
-		node = src_node or dst_node,
-		target = (src_node and dst_node) and dst_node or nil,
 		src_node = src_node,
 		dst_node = dst_node,
 		src_range = src_range,
 		dst_range = dst_range,
+		src = src_range and vim.tbl_extend("force", {}, src_range, { text = nil }) or nil,
+		dst = dst_range and vim.tbl_extend("force", {}, dst_range, { text = nil }) or nil,
 		lines = {
-			from_line = src_range and src_range.start_line or nil,
-			to_line = dst_range and dst_range.start_line or nil,
+			from_line = from_line,
+			to_line = to_line,
+		},
+		metadata = {
+			node_type = node and node:type() or nil,
+			old_name = nil,
+			new_name = nil,
+			from_line = from_line,
+			to_line = to_line,
+			suppressed_renames = nil,
 		},
 	}
 
 	if extra then
 		for key, value in pairs(extra) do
 			action[key] = value
+		end
+		action.metadata.old_name = extra.old_name or extra.from or action.metadata.old_name
+		action.metadata.new_name = extra.new_name or extra.to or action.metadata.new_name
+		action.metadata.from_line = extra.from_line or action.metadata.from_line
+		action.metadata.to_line = extra.to_line or action.metadata.to_line
+		if extra.context and extra.context.suppressed_usages then
+			action.metadata.suppressed_renames = extra.context.suppressed_usages
 		end
 	end
 
@@ -65,11 +82,6 @@ local function build_summary(actions_list)
 		deletes = {},
 	}
 
-	local function action_node_type(action)
-		local node = action.src_node or action.dst_node
-		return node and node:type() or nil
-	end
-
 	for _, action in ipairs(actions_list) do
 		local t = action.type
 		if summary.counts[t] ~= nil then
@@ -78,25 +90,26 @@ local function build_summary(actions_list)
 
 		if t == "move" then
 			table.insert(summary.moves, {
-				node_type = action_node_type(action),
-				from_line = action.lines and action.lines.from_line or nil,
-				to_line = action.lines and action.lines.to_line or nil,
-				src_range = action.src_range,
-				dst_range = action.dst_range,
+				node_type = action.metadata and action.metadata.node_type or nil,
+				from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
+				to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
+				src_range = action.src or action.src_range,
+				dst_range = action.dst or action.dst_range,
 			})
 		elseif t == "rename" then
-			local suppressed_usages = action.context and action.context.suppressed_usages or {}
+			local suppressed_usages = action.metadata and action.metadata.suppressed_renames
+				or (action.context and action.context.suppressed_usages or {})
 			local suppressed_count = #suppressed_usages
 			summary.counts.rename_suppressed = summary.counts.rename_suppressed + suppressed_count
 
 			table.insert(summary.renames, {
-				node_type = action_node_type(action),
-				from = action.from,
-				to = action.to,
-				from_line = action.lines and action.lines.from_line or nil,
-				to_line = action.lines and action.lines.to_line or nil,
-				src_range = action.src_range,
-				dst_range = action.dst_range,
+				node_type = action.metadata and action.metadata.node_type or nil,
+				from = action.metadata and action.metadata.old_name or action.from,
+				to = action.metadata and action.metadata.new_name or action.to,
+				from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
+				to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
+				src_range = action.src or action.src_range,
+				dst_range = action.dst or action.dst_range,
 				suppressed_usage_count = suppressed_count,
 			})
 
@@ -106,35 +119,35 @@ local function build_summary(actions_list)
 					to = usage.to,
 					from_line = usage.lines and usage.lines.from_line or nil,
 					to_line = usage.lines and usage.lines.to_line or nil,
-					src_range = usage.src_range,
-					dst_range = usage.dst_range,
+					src_range = usage.src or usage.src_range,
+					dst_range = usage.dst or usage.dst_range,
 					suppressed_by = {
-						from = action.from,
-						to = action.to,
-						from_line = action.lines and action.lines.from_line or nil,
-						to_line = action.lines and action.lines.to_line or nil,
+						from = action.metadata and action.metadata.old_name or action.from,
+						to = action.metadata and action.metadata.new_name or action.to,
+						from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
+						to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
 					},
 				})
 			end
 		elseif t == "update" then
 			table.insert(summary.updates, {
-				node_type = action_node_type(action),
-				from_line = action.lines and action.lines.from_line or nil,
-				to_line = action.lines and action.lines.to_line or nil,
-				src_range = action.src_range,
-				dst_range = action.dst_range,
+				node_type = action.metadata and action.metadata.node_type or nil,
+				from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
+				to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
+				src_range = action.src or action.src_range,
+				dst_range = action.dst or action.dst_range,
 			})
 		elseif t == "insert" then
 			table.insert(summary.inserts, {
-				node_type = action_node_type(action),
-				line = action.lines and action.lines.to_line or nil,
-				dst_range = action.dst_range,
+				node_type = action.metadata and action.metadata.node_type or nil,
+				line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
+				dst_range = action.dst or action.dst_range,
 			})
 		elseif t == "delete" then
 			table.insert(summary.deletes, {
-				node_type = action_node_type(action),
-				line = action.lines and action.lines.from_line or nil,
-				src_range = action.src_range,
+				node_type = action.metadata and action.metadata.node_type or nil,
+				line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
+				src_range = action.src or action.src_range,
 			})
 		end
 	end
@@ -180,8 +193,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 
 		for _, action in ipairs(actions_list) do
-			local src_node = action.src_node or action.node
-			local dst_node = action.dst_node or action.target
+			local src_node = action.src_node
+			local dst_node = action.dst_node
 			if action.type == "update" and src_node and dst_node then
 				local leaf_changes = semantic.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
 				local rename_pairs = {}
@@ -194,7 +207,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 					end
 				end
 
-				action.semantic = {
+				action.analysis = {
 					leaf_changes = leaf_changes,
 					rename_pairs = rename_pairs,
 				}
@@ -301,8 +314,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 
 		-- Pass 1a: high-confidence declaration-like rename seeds from semantic leaf changes.
 		for _, action in ipairs(actions_list) do
-			if action.type == "update" and action.semantic and action.semantic.leaf_changes then
-				for _, change in ipairs(action.semantic.leaf_changes) do
+			if action.type == "update" and action.analysis and action.analysis.leaf_changes then
+				for _, change in ipairs(action.analysis.leaf_changes) do
 					local src_node = change.src_node
 					local dst_node = change.dst_node
 					if src_node and dst_node and change.src_text ~= change.dst_text and is_decl_rename(src_node, dst_node) then
@@ -326,8 +339,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 								add_seed(s.text, d.text)
 								if is_decl_rename(s.node, d.node) then
 									push_rename(s.node, d.node, s.text, d.text, {
-										src_parent_type = action.node and action.node:type() or nil,
-										dst_parent_type = action.target and action.target:type() or nil,
+										src_parent_type = action.src_node and action.src_node:type() or nil,
+										dst_parent_type = action.dst_node and action.dst_node:type() or nil,
 										source = "parameter_positional",
 										declaration = true,
 									})
@@ -406,8 +419,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 
 		-- Pass 2: emit leaf rename actions gated by seeds (and declaration renames).
 		for _, action in ipairs(actions_list) do
-			if action.type == "update" and action.semantic and action.semantic.leaf_changes then
-				for _, change in ipairs(action.semantic.leaf_changes) do
+			if action.type == "update" and action.analysis and action.analysis.leaf_changes then
+				for _, change in ipairs(action.analysis.leaf_changes) do
 					local src_node = change.src_node
 					local dst_node = change.dst_node
 					local src_text = change.src_text
@@ -417,8 +430,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 						local key = pair_key(src_text, dst_text)
 						if seed_pairs[key] or is_decl then
 							push_rename(src_node, dst_node, src_text, dst_text, {
-								src_parent_type = action.node and action.node:type() or nil,
-								dst_parent_type = action.target and action.target:type() or nil,
+								src_parent_type = action.src_node and action.src_node:type() or nil,
+								dst_parent_type = action.dst_node and action.dst_node:type() or nil,
 								declaration = is_decl,
 							})
 						end
@@ -503,25 +516,31 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		-- If a declaration rename exists for a pair, suppress usage-level duplicates for that pair.
 		local declaration_pairs = {}
 		for _, rename_action in ipairs(renames) do
+			local from_name = rename_action.metadata and rename_action.metadata.old_name or rename_action.from
+			local to_name = rename_action.metadata and rename_action.metadata.new_name or rename_action.to
 			if rename_action.context and rename_action.context.declaration then
-				declaration_pairs[pair_key(rename_action.from, rename_action.to)] = true
+				declaration_pairs[pair_key(from_name, to_name)] = true
 			end
 		end
 
 		local suppressed_by_pair = {}
 		local filtered_renames = {}
 		for _, rename_action in ipairs(renames) do
-			local key = pair_key(rename_action.from, rename_action.to)
+			local from_name = rename_action.metadata and rename_action.metadata.old_name or rename_action.from
+			local to_name = rename_action.metadata and rename_action.metadata.new_name or rename_action.to
+			local key = pair_key(from_name, to_name)
 			local is_declaration = rename_action.context and rename_action.context.declaration
 			if not declaration_pairs[key] or is_declaration then
 				table.insert(filtered_renames, rename_action)
 			else
 				suppressed_by_pair[key] = suppressed_by_pair[key] or {}
 				table.insert(suppressed_by_pair[key], {
-					from = rename_action.from,
-					to = rename_action.to,
-					src_range = rename_action.src_range,
-					dst_range = rename_action.dst_range,
+					from = from_name,
+					to = to_name,
+					src = rename_action.src,
+					dst = rename_action.dst,
+					src_range = rename_action.src or rename_action.src_range,
+					dst_range = rename_action.dst or rename_action.dst_range,
 					lines = rename_action.lines,
 					context = rename_action.context,
 				})
@@ -530,11 +549,16 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 
 		for _, rename_action in ipairs(filtered_renames) do
 			if rename_action.context and rename_action.context.declaration then
-				local key = pair_key(rename_action.from, rename_action.to)
+				local from_name = rename_action.metadata and rename_action.metadata.old_name or rename_action.from
+				local to_name = rename_action.metadata and rename_action.metadata.new_name or rename_action.to
+				local key = pair_key(from_name, to_name)
 				local suppressed_usages = suppressed_by_pair[key]
 				if suppressed_usages and #suppressed_usages > 0 then
 					rename_action.context.suppressed_usages = suppressed_usages
 					rename_action.context.suppressed_usage_count = #suppressed_usages
+					if rename_action.metadata then
+						rename_action.metadata.suppressed_renames = suppressed_usages
+					end
 				end
 			end
 		end
@@ -851,14 +875,14 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	emit_rename_actions(actions)
 	stop_timer(rename_start, "renames")
 
-	local render_start = start_timer()
+	local analysis_start = start_timer()
 	if src_buf and dst_buf then
-		payload.enrich(actions, {
+		analysis.enrich(actions, {
 			src_buf = src_buf,
 			dst_buf = dst_buf,
 		})
 	end
-	stop_timer(render_start, "payload")
+	stop_timer(analysis_start, "analysis")
 
 	local summary_start = start_timer()
 	local summary = build_summary(actions)

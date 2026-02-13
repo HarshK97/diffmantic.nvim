@@ -55,7 +55,12 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 			return variable_name
 		end
 
-		if node:type() == "class_specifier" or node:type() == "struct_specifier" or node:type() == "enum_specifier" or node:type() == "union_specifier" then
+		if
+			node:type() == "class_specifier"
+			or node:type() == "struct_specifier"
+			or node:type() == "enum_specifier"
+			or node:type() == "union_specifier"
+		then
 			local name_node = node:field("name")[1] or node:field("tag")[1]
 			if name_node then
 				return vim.treesitter.get_node_text(name_node, bufnr)
@@ -283,7 +288,8 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 	}
 
 	local function is_identifier_type(info, role_index)
-		if roles.has_kind(info.node, role_index, "function")
+		if
+			roles.has_kind(info.node, role_index, "function")
 			or roles.has_kind(info.node, role_index, "class")
 			or roles.has_kind(info.node, role_index, "variable")
 			or roles.has_kind(info.node, role_index, "assignment")
