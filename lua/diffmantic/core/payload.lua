@@ -266,6 +266,8 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 		dst_spans = {},
 		src_signs = {},
 		dst_signs = {},
+		src_fillers = {},
+		dst_fillers = {},
 	}
 
 	local function base_col_for_row(row, start_row, start_col)
@@ -394,6 +396,7 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 			end
 
 			if count_a > overlap and not only_changes then
+				local del_count = count_a - overlap
 				for i = overlap, count_a - 1 do
 					local src_row = sr + start_a - 1 + i
 					local s_line = src_lines[start_a + i]
@@ -402,9 +405,18 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 					did_highlight = mark_line_tokens(src_buf, out.src_spans, src_row, s_line, src_base, "DiffmanticDelete")
 						or did_highlight
 				end
+				local dst_anchor = count_b > 0
+					and (tr + start_b - 1 + overlap)
+					or (tr + start_b)
+				table.insert(out.dst_fillers, {
+					row = dst_anchor,
+					count = del_count,
+					hl_group = "DiffmanticDeleteFiller",
+				})
 			end
 
 			if count_b > overlap and not only_changes then
+				local ins_count = count_b - overlap
 				for i = overlap, count_b - 1 do
 					local dst_row = tr + start_b - 1 + i
 					local d_line = dst_lines[start_b + i]
@@ -413,6 +425,14 @@ local function build_internal_diff(src_node, dst_node, src_buf, dst_buf, rename_
 					did_highlight = mark_line_tokens(dst_buf, out.dst_spans, dst_row, d_line, dst_base, "DiffmanticAdd")
 						or did_highlight
 				end
+				local src_anchor = count_a > 0
+					and (sr + start_a - 1 + overlap)
+					or (sr + start_a)
+				table.insert(out.src_fillers, {
+					row = src_anchor,
+					count = ins_count,
+					hl_group = "DiffmanticAddFiller",
+				})
 			end
 		end
 	else
@@ -472,6 +492,8 @@ function M.enrich(actions, opts)
 	local rename_map = {}
 	local rename_src_nodes = {}
 	local rename_dst_nodes = {}
+	local moved_src_ranges = {} -- { {sr, er}, ... }
+	local moved_dst_ranges = {} -- { {sr, er}, ... }
 
 	for _, action in ipairs(actions) do
 		if action.type == "rename" then
@@ -483,6 +505,15 @@ function M.enrich(actions, opts)
 			end
 			if action.dst_node then
 				rename_dst_nodes[action.dst_node:id()] = true
+			end
+		elseif action.type == "move" then
+			if action.src_node then
+				local sr, _, er, _ = action.src_node:range()
+				table.insert(moved_src_ranges, { sr, er })
+			end
+			if action.dst_node then
+				local sr, _, er, _ = action.dst_node:range()
+				table.insert(moved_dst_ranges, { sr, er })
 			end
 		end
 	end
@@ -590,6 +621,39 @@ function M.enrich(actions, opts)
 					end
 					for _, sign in ipairs(diff_ops.dst_signs) do
 						table.insert(render.dst_signs, sign)
+					end
+					local is_moved = false
+					if src_node then
+						local nsr, _, ner, _ = src_node:range()
+						for _, r in ipairs(moved_src_ranges) do
+							if nsr >= r[1] and ner <= r[2] then
+								is_moved = true
+								break
+							end
+						end
+					end
+					if not is_moved and dst_node then
+						local nsr, _, ner, _ = dst_node:range()
+						for _, r in ipairs(moved_dst_ranges) do
+							if nsr >= r[1] and ner <= r[2] then
+								is_moved = true
+								break
+							end
+						end
+					end
+					if not is_moved then
+						if diff_ops.src_fillers then
+							render.src_fillers = render.src_fillers or {}
+							for _, f in ipairs(diff_ops.src_fillers) do
+								table.insert(render.src_fillers, f)
+							end
+						end
+						if diff_ops.dst_fillers then
+							render.dst_fillers = render.dst_fillers or {}
+							for _, f in ipairs(diff_ops.dst_fillers) do
+								table.insert(render.dst_fillers, f)
+							end
+						end
 					end
 					touched = true
 				end

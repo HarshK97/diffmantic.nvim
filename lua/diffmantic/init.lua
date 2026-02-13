@@ -54,6 +54,10 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "DiffmanticMoveSign", { fg = move_sign_fg, bg = "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticRenameSign", { fg = change_sign_fg, bg = "NONE" })
 
+	vim.api.nvim_set_hl(0, "DiffmanticAddFiller", { fg = add_sign_fg, bg = add_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticDeleteFiller", { fg = delete_sign_fg, bg = delete_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticMoveFiller", { fg = move_sign_fg, bg = move_bg })
+
 end
 
 function M.setup(opts)

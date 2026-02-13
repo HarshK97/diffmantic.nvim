@@ -1,4 +1,5 @@
 local signs = require("diffmantic.ui.signs")
+local filler = require("diffmantic.ui.filler")
 
 local M = {}
 
@@ -65,6 +66,8 @@ end
 function M.render(src_buf, dst_buf, actions, ns)
 	local src_sign_rows = {}
 	local dst_sign_rows = {}
+	local extra_src_fillers = {}
+	local extra_dst_fillers = {}
 
 	for _, action in ipairs(actions) do
 		local render = action.render
@@ -75,9 +78,31 @@ function M.render(src_buf, dst_buf, actions, ns)
 			apply_signs(dst_buf, ns, render.dst_signs, dst_sign_rows)
 			apply_virt(src_buf, ns, render.src_virt)
 			apply_virt(dst_buf, ns, render.dst_virt)
+
+			if render.src_fillers then
+				for _, f in ipairs(render.src_fillers) do
+					table.insert(extra_src_fillers, f)
+				end
+			end
+			if render.dst_fillers then
+				for _, f in ipairs(render.dst_fillers) do
+					table.insert(extra_dst_fillers, f)
+				end
+			end
 		end
 	end
 
+	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf)
+
+	for _, f in ipairs(extra_src_fillers) do
+		table.insert(src_fillers, f)
+	end
+	for _, f in ipairs(extra_dst_fillers) do
+		table.insert(dst_fillers, f)
+	end
+
+	filler.apply(src_buf, ns, src_fillers)
+	filler.apply(dst_buf, ns, dst_fillers)
 end
 
 return M
