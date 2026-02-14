@@ -200,6 +200,99 @@ local function hunk_delete(src_range)
 	return { kind = "delete", src = src_range, dst = nil }
 end
 
+local function range_contains(outer, inner)
+	if not outer or not inner then
+		return false
+	end
+	if outer.start_row == nil or outer.end_row == nil or outer.start_col == nil or outer.end_col == nil then
+		return false
+	end
+	if inner.start_row == nil or inner.end_row == nil or inner.start_col == nil or inner.end_col == nil then
+		return false
+	end
+	if inner.start_row < outer.start_row or inner.end_row > outer.end_row then
+		return false
+	end
+	if inner.start_row == outer.start_row and inner.start_col < outer.start_col then
+		return false
+	end
+	if inner.end_row == outer.end_row and inner.end_col > outer.end_col then
+		return false
+	end
+	return true
+end
+
+local function clone_range_like(r)
+	return clone_range(r)
+end
+
+local function collect_suppressed_rename_pairs(actions)
+	local pairs = {}
+	local declaration_pairs = {}
+	for _, action in ipairs(actions) do
+		if action.type == "rename" then
+			local old_name = action.metadata and action.metadata.old_name or action.from
+			local new_name = action.metadata and action.metadata.new_name or action.to
+			if action.context and action.context.declaration and old_name and new_name and old_name ~= new_name then
+				declaration_pairs[old_name] = new_name
+			end
+
+			local suppressed = action.metadata and action.metadata.suppressed_renames or nil
+			if suppressed then
+				for _, usage in ipairs(suppressed) do
+					local src = clone_range_like(usage.src or usage.src_range)
+					local dst = clone_range_like(usage.dst or usage.dst_range)
+					if src and dst then
+						table.insert(pairs, { src = src, dst = dst })
+					end
+				end
+			end
+		end
+	end
+	return pairs, declaration_pairs
+end
+
+local function text_for_range(buf, range)
+	if not buf or not range then
+		return nil
+	end
+	if range.start_row == nil or range.end_row == nil or range.start_col == nil or range.end_col == nil then
+		return nil
+	end
+	if range.start_row ~= range.end_row then
+		return nil
+	end
+	local line = line_text(buf, range.start_row)
+	if not line or line == "" then
+		return nil
+	end
+	local start_col = range.start_col + 1
+	local end_col = range.end_col
+	if end_col < start_col then
+		return nil
+	end
+	return line:sub(start_col, end_col)
+end
+
+local function is_suppressed_change_hunk(hunk_src, hunk_dst, suppressed_pairs, declaration_pairs, src_buf, dst_buf)
+	if not hunk_src or not hunk_dst then
+		return false
+	end
+	for _, pair in ipairs(suppressed_pairs) do
+		if range_contains(hunk_src, pair.src) and range_contains(hunk_dst, pair.dst) then
+			return true
+		end
+	end
+	if declaration_pairs and next(declaration_pairs) then
+		local src_text = text_for_range(src_buf, hunk_src)
+		local dst_text = text_for_range(dst_buf, hunk_dst)
+		if src_text and dst_text and declaration_pairs[src_text] == dst_text then
+			return true
+		end
+	end
+	return false
+end
+
 local function fallback_hunks_from_diff(src_node, dst_node, src_buf, dst_buf, rename_pairs)
 	local src_text = vim.treesitter.get_node_text(src_node, src_buf)
 	local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
@@ -319,6 +412,7 @@ function M.enrich(actions, opts)
 	if not src_buf or not dst_buf then
 		return
 	end
+	local suppressed_pairs, declaration_pairs = collect_suppressed_rename_pairs(actions)
 
 	for _, action in ipairs(actions) do
 		if action.type == "update" and action.src_node and action.dst_node then
@@ -362,7 +456,18 @@ function M.enrich(actions, opts)
 						end
 					end
 
-					if hunk_src and hunk_dst then
+					if
+						hunk_src
+						and hunk_dst
+						and not is_suppressed_change_hunk(
+							hunk_src,
+							hunk_dst,
+							suppressed_pairs,
+							declaration_pairs,
+							src_buf,
+							dst_buf
+						)
+					then
 						table.insert(hunks, hunk_change(hunk_src, hunk_dst))
 					end
 				end
@@ -370,6 +475,25 @@ function M.enrich(actions, opts)
 
 			if #hunks == 0 then
 				hunks = fallback_hunks_from_diff(action.src_node, action.dst_node, src_buf, dst_buf, rename_pairs)
+			end
+			if #suppressed_pairs > 0 and #hunks > 0 then
+				local filtered = {}
+				for _, hunk in ipairs(hunks) do
+					if
+						hunk.kind ~= "change"
+						or not is_suppressed_change_hunk(
+							hunk.src,
+							hunk.dst,
+							suppressed_pairs,
+							declaration_pairs,
+							src_buf,
+							dst_buf
+						)
+					then
+						table.insert(filtered, hunk)
+					end
+				end
+				hunks = filtered
 			end
 
 			action.analysis = {

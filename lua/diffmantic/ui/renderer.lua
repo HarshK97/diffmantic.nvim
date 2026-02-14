@@ -18,92 +18,151 @@ local function set_extmark(buf, ns, row, col, opts)
 	return pcall(vim.api.nvim_buf_set_extmark, buf, ns, row, col, opts)
 end
 
-local function apply_spans(buf, ns, spans)
-	if not spans then
+local function apply_span(buf, ns, range, hl_group)
+	if not range or not hl_group then
 		return
 	end
-	for _, span in ipairs(spans) do
-		if span and span.row ~= nil and span.start_col ~= nil and span.end_col ~= nil and span.hl_group then
-			set_extmark(buf, ns, span.row, span.start_col, {
-				end_row = span.end_row or span.row,
-				end_col = span.end_col,
-				hl_group = span.hl_group,
-			})
-		end
+	local sr = range.start_row
+	local sc = range.start_col
+	local er = range.end_row or sr
+	local ec = range.end_col
+	if sr == nil or sc == nil or ec == nil then
+		return
+	end
+	if sr == er and ec <= sc then
+		ec = sc + 1
+	end
+	set_extmark(buf, ns, sr, sc, {
+		end_row = er,
+		end_col = ec,
+		hl_group = hl_group,
+	})
+end
+
+local function apply_sign(buf, ns, row, text, hl_group, seen_rows)
+	if row == nil or not text or not hl_group then
+		return
+	end
+	signs.mark(buf, ns, row, 0, text, hl_group, seen_rows)
+end
+
+local function apply_virt(buf, ns, row, col, text, hl_group, pos)
+	if row == nil or not text then
+		return
+	end
+	local opts = {
+		virt_text = { { text, hl_group or "Comment" } },
+		virt_text_pos = pos or "eol",
+	}
+	local ok = set_extmark(buf, ns, row, col or 0, opts)
+	if not ok and opts.virt_text_pos == "inline" then
+		opts.virt_text_pos = "eol"
+		set_extmark(buf, ns, row, col or 0, opts)
 	end
 end
 
-local function apply_signs(buf, ns, list, seen_rows)
-	if not list then
-		return
-	end
-	for _, item in ipairs(list) do
-		if item and item.row ~= nil and item.text and item.hl_group then
-			signs.mark(buf, ns, item.row, item.col or 0, item.text, item.hl_group, seen_rows)
-		end
-	end
-end
+local TYPE_STYLE = {
+	move = { hl = "DiffmanticMove", sign = "M" },
+	rename = { hl = "DiffmanticRename", sign = "R" },
+	update = { hl = "DiffmanticChange", sign = "U" },
+	insert = { hl = "DiffmanticAdd", sign = "+" },
+	delete = { hl = "DiffmanticDelete", sign = "-" },
+}
 
-local function apply_virt(buf, ns, list)
-	if not list then
-		return
+local HUNK_STYLE = {
+	change = {
+		src_hl = "DiffmanticChange",
+		dst_hl = "DiffmanticChange",
+		src_sign = "U",
+		dst_sign = "U",
+	},
+	insert = {
+		src_hl = nil,
+		dst_hl = "DiffmanticAdd",
+		src_sign = nil,
+		dst_sign = "+",
+	},
+	delete = {
+		src_hl = "DiffmanticDelete",
+		dst_hl = nil,
+		src_sign = "-",
+		dst_sign = nil,
+	},
+}
+
+local function move_to_arrow(from_line, to_line)
+	if type(from_line) ~= "number" or type(to_line) ~= "number" then
+		return "⤴"
 	end
-	for _, item in ipairs(list) do
-		if item and item.row ~= nil and item.text then
-			local opts = {
-				virt_text = { { item.text, item.hl_group or "Comment" } },
-				virt_text_pos = item.pos or "eol",
-			}
-			local ok = set_extmark(buf, ns, item.row, item.col or 0, opts)
-			if not ok and opts.virt_text_pos == "inline" then
-				opts.virt_text_pos = "eol"
-				set_extmark(buf, ns, item.row, item.col or 0, opts)
-			end
-		end
+	if to_line > from_line then
+		return "⤵"
 	end
+	return "⤴"
 end
 
 function M.render(src_buf, dst_buf, actions, ns)
 	local src_sign_rows = {}
 	local dst_sign_rows = {}
-	local extra_src_fillers = {}
-	local extra_dst_fillers = {}
 
 	for _, action in ipairs(actions) do
-		local render = action.render
-		if render then
-			apply_spans(src_buf, ns, render.src_spans)
-			apply_spans(dst_buf, ns, render.dst_spans)
-			apply_signs(src_buf, ns, render.src_signs, src_sign_rows)
-			apply_signs(dst_buf, ns, render.dst_signs, dst_sign_rows)
-			apply_virt(src_buf, ns, render.src_virt)
-			apply_virt(dst_buf, ns, render.dst_virt)
+		local style = TYPE_STYLE[action.type]
+		if style then
+			local src = action.src or action.src_range
+			local dst = action.dst or action.dst_range
+			local meta = action.metadata or {}
 
-			if render.src_fillers then
-				for _, f in ipairs(render.src_fillers) do
-					table.insert(extra_src_fillers, f)
+			if action.type == "update" and action.analysis and action.analysis.hunks then
+				for _, hunk in ipairs(action.analysis.hunks) do
+					local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
+					if hunk.src and hstyle.src_hl then
+						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
+						apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
+					end
+					if hunk.dst and hstyle.dst_hl then
+						apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
+						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
+					end
 				end
-			end
-			if render.dst_fillers then
-				for _, f in ipairs(render.dst_fillers) do
-					table.insert(extra_dst_fillers, f)
+
+				if src and src.start_row ~= nil then
+					apply_sign(src_buf, ns, src.start_row, "U", "DiffmanticChange", src_sign_rows)
+				end
+				if dst and dst.start_row ~= nil then
+					apply_sign(dst_buf, ns, dst.start_row, "U", "DiffmanticChange", dst_sign_rows)
+				end
+			else
+				if src then
+					apply_span(src_buf, ns, src, style.hl)
+					apply_sign(src_buf, ns, src.start_row, style.sign, style.hl, src_sign_rows)
+				end
+				if dst then
+					apply_span(dst_buf, ns, dst, style.hl)
+					apply_sign(dst_buf, ns, dst.start_row, style.sign, style.hl, dst_sign_rows)
+				end
+
+				if action.type == "move" then
+					if src and meta.to_line then
+						local arrow = move_to_arrow(meta.from_line, meta.to_line)
+						apply_virt(src_buf, ns, src.start_row, src.end_col or 0, string.format(" %s moved to L%d", arrow, meta.to_line), "Comment", "eol")
+					end
+					if dst and meta.from_line then
+						apply_virt(dst_buf, ns, dst.start_row, dst.end_col or 0, string.format(" ⤶ from L%d", meta.from_line), "Comment", "eol")
+					end
+				elseif action.type == "rename" then
+					if src and meta.new_name then
+						apply_virt(src_buf, ns, src.start_row, src.end_col or 0, " -> " .. meta.new_name, "Comment", "inline")
+					end
+					if dst and meta.old_name then
+						apply_virt(dst_buf, ns, dst.start_row, dst.end_col or 0, string.format(" (was %s)", meta.old_name), "Comment", "inline")
+					end
 				end
 			end
 		end
 	end
 
 	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf)
-
-	for _, f in ipairs(extra_src_fillers) do
-		table.insert(src_fillers, f)
-	end
-	for _, f in ipairs(extra_dst_fillers) do
-		table.insert(dst_fillers, f)
-	end
-
 	filler.apply(src_buf, ns, src_fillers)
 	filler.apply(dst_buf, ns, dst_fillers)
 end
 
 return M
-

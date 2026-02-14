@@ -6,6 +6,59 @@ local function make_virt_line(hl_group, char)
 	return { { string.rep(char or "╱", VIRT_LINE_LEN), hl_group } }
 end
 
+local function span_line_count(range)
+	if not range then
+		return 0
+	end
+	local sr = range.start_row
+	local er = range.end_row
+	local ec = range.end_col
+	if sr == nil or er == nil or ec == nil then
+		return 0
+	end
+	local count = er - sr
+	if ec > 0 then
+		count = count + 1
+	end
+	if count <= 0 then
+		count = 1
+	end
+	return count
+end
+
+local function line_trim_bounds(line)
+	if not line then
+		return nil, nil
+	end
+	local first = line:find("%S")
+	if not first then
+		return nil, nil
+	end
+	local rev_last = line:reverse():find("%S")
+	local last = #line - rev_last + 1
+	return first - 1, last
+end
+
+local function is_whole_line_span(buf, range)
+	if not range then
+		return false
+	end
+	if range.start_row == nil or range.end_row == nil then
+		return false
+	end
+	if range.start_row ~= range.end_row then
+		return true
+	end
+	local row = range.start_row
+	local lines = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)
+	local line = lines[1] or ""
+	local first_col, last_col_exclusive = line_trim_bounds(line)
+	if not first_col then
+		return false
+	end
+	return range.start_col <= first_col and range.end_col >= last_col_exclusive
+end
+
 local function trailing_blanks(buf, end_row, end_col)
 	local last_occupied = end_col > 0 and end_row or (end_row - 1)
 	local buf_count = vim.api.nvim_buf_line_count(buf)
@@ -23,50 +76,158 @@ local function trailing_blanks(buf, end_row, end_col)
 	return count
 end
 
-local function is_top_level(node)
-	if not node then
+local function range_within(inner, outer)
+	if not inner or not outer then
 		return false
 	end
-	local parent = node:parent()
-	return parent ~= nil and parent:parent() == nil
+	if inner.start_row == nil or inner.end_row == nil or inner.start_col == nil or inner.end_col == nil then
+		return false
+	end
+	if outer.start_row == nil or outer.end_row == nil or outer.start_col == nil or outer.end_col == nil then
+		return false
+	end
+	if inner.start_row < outer.start_row or inner.end_row > outer.end_row then
+		return false
+	end
+	if inner.start_row == outer.start_row and inner.start_col < outer.start_col then
+		return false
+	end
+	if inner.end_row == outer.end_row and inner.end_col > outer.end_col then
+		return false
+	end
+	return true
+end
+
+local function add_filler(dst_list, seen, row, count, hl_group)
+	if row == nil or count == nil or count <= 0 or not hl_group then
+		return
+	end
+	local key = table.concat({ tostring(row), tostring(count), hl_group }, ":")
+	if seen[key] then
+		return
+	end
+	seen[key] = true
+	table.insert(dst_list, {
+		row = row,
+		count = count,
+		hl_group = hl_group,
+	})
+end
+
+local function mirror_dst_row_into_src(update_src, update_dst, dst_row)
+	if not update_src or not update_dst or dst_row == nil then
+		return dst_row
+	end
+	local offset = math.max(0, dst_row - update_dst.start_row)
+	return update_src.start_row + offset
+end
+
+local function mirror_src_row_into_dst(update_src, update_dst, src_row)
+	if not update_src or not update_dst or src_row == nil then
+		return src_row
+	end
+	local offset = math.max(0, src_row - update_src.start_row)
+	return update_dst.start_row + offset
+end
+
+local function collect_runs(ranges)
+	if not ranges or #ranges == 0 then
+		return {}
+	end
+	table.sort(ranges, function(a, b)
+		return a.start_row < b.start_row
+	end)
+	local runs = {}
+	for _, range in ipairs(ranges) do
+		local count = span_line_count(range)
+		local current = runs[#runs]
+		if current and range.start_row <= (current.end_row + 1) then
+			current.end_row = math.max(current.end_row, range.end_row)
+			current.count = current.count + count
+		else
+			table.insert(runs, {
+				start_row = range.start_row,
+				end_row = range.end_row,
+				count = count,
+			})
+		end
+	end
+	return runs
 end
 
 function M.compute(actions, src_buf, dst_buf)
 	local src_fillers = {}
 	local dst_fillers = {}
+	local seen_src = {}
+	local seen_dst = {}
+	local move_src_ranges = {}
+	local move_dst_ranges = {}
+
+	for _, action in ipairs(actions) do
+		if action.type == "move" then
+			local src = action.src or action.src_range
+			local dst = action.dst or action.dst_range
+			if src then
+				table.insert(move_src_ranges, src)
+			end
+			if dst then
+				table.insert(move_dst_ranges, dst)
+			end
+		end
+	end
+
+	local function inside_move_src(range)
+		if not range then
+			return false
+		end
+		for _, moved in ipairs(move_src_ranges) do
+			if range_within(range, moved) then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function inside_move_dst(range)
+		if not range then
+			return false
+		end
+		for _, moved in ipairs(move_dst_ranges) do
+			if range_within(range, moved) then
+				return true
+			end
+		end
+		return false
+	end
 
 	for _, action in ipairs(actions) do
 		local t = action.type
+		local src = action.src or action.src_range
+		local dst = action.dst or action.dst_range
 
-		if t == "insert" and action.dst_node and is_top_level(action.dst_node) then
-			local sr, _, er, ec = action.dst_node:range()
-			local count = er - sr
-			if ec > 0 then
-				count = count + 1
+		if t == "insert" and dst and dst.start_row ~= nil then
+			if inside_move_dst(dst) then
+				goto continue
 			end
-			count = count + trailing_blanks(dst_buf, er, ec)
-			if count > 0 then
-				table.insert(src_fillers, {
-					row = sr,
-					count = count,
-					hl_group = "DiffmanticAddFiller",
-				})
+			if not is_whole_line_span(dst_buf, dst) then
+				goto continue
 			end
-		elseif t == "delete" and action.src_node and is_top_level(action.src_node) then
-			local sr, _, er, ec = action.src_node:range()
-			local count = er - sr
-			if ec > 0 then
-				count = count + 1
+			local count = span_line_count(dst)
+			if count >= 1 then
+				add_filler(src_fillers, seen_src, dst.start_row, count, "DiffmanticAddFiller")
 			end
-			count = count + trailing_blanks(src_buf, er, ec)
-			if count > 0 then
-				table.insert(dst_fillers, {
-					row = sr,
-					count = count,
-					hl_group = "DiffmanticDeleteFiller",
-				})
+		elseif t == "delete" and src and src.start_row ~= nil then
+			if inside_move_src(src) then
+				goto continue
 			end
-		elseif t == "move" and action.src_node and action.dst_node and is_top_level(action.src_node) then
+			if not is_whole_line_span(src_buf, src) then
+				goto continue
+			end
+			local count = span_line_count(src)
+			if count >= 1 then
+				add_filler(dst_fillers, seen_dst, src.start_row, count, "DiffmanticDeleteFiller")
+			end
+		elseif t == "move" and action.src_node and action.dst_node then
 			local ssr, _, ser, sec = action.src_node:range()
 			local src_body = ser - ssr
 			if sec > 0 then
@@ -151,7 +312,52 @@ function M.compute(actions, src_buf, dst_buf)
 					})
 				end
 			end
+		elseif t == "update" and action.analysis and action.analysis.hunks then
+			local update_src = action.src or action.src_range
+			local update_dst = action.dst or action.dst_range
+			local move_related_update = inside_move_src(update_src) or inside_move_dst(update_dst)
+			if move_related_update then
+				goto continue
+			end
+
+			local insert_ranges = {}
+			local delete_ranges = {}
+			for _, hunk in ipairs(action.analysis.hunks) do
+				if hunk.kind == "insert" and hunk.dst then
+					table.insert(insert_ranges, hunk.dst)
+				elseif hunk.kind == "delete" and hunk.src then
+					table.insert(delete_ranges, hunk.src)
+				end
+			end
+
+			local insert_runs = collect_runs(insert_ranges)
+			local delete_runs = collect_runs(delete_ranges)
+
+			for _, run in ipairs(insert_runs) do
+				local anchor = mirror_dst_row_into_src(update_src, update_dst, run.start_row)
+				local deleted_before = 0
+				for _, d in ipairs(delete_runs) do
+					if d.start_row <= anchor then
+						deleted_before = deleted_before + d.count
+					end
+				end
+				anchor = anchor + deleted_before
+				add_filler(src_fillers, seen_src, anchor, run.count, "DiffmanticAddFiller")
+			end
+
+			for _, run in ipairs(delete_runs) do
+				local anchor = mirror_src_row_into_dst(update_src, update_dst, run.start_row)
+				local inserted_before = 0
+				for _, ins in ipairs(insert_runs) do
+					if ins.start_row <= anchor then
+						inserted_before = inserted_before + ins.count
+					end
+				end
+				anchor = anchor + inserted_before
+				add_filler(dst_fillers, seen_dst, anchor, run.count, "DiffmanticDeleteFiller")
+			end
 		end
+		::continue::
 	end
 
 	table.sort(src_fillers, function(a, b)
