@@ -39,16 +39,25 @@ local function build_action(action_type, src_node, dst_node, extra)
 			to_line = to_line,
 			suppressed_renames = nil,
 		},
+		analysis = nil,
 	}
 
 	if extra then
-		for key, value in pairs(extra) do
-			action[key] = value
+		if extra.context then
+			action.context = extra.context
+		end
+		if extra.analysis then
+			action.analysis = extra.analysis
+		end
+		if extra.metadata then
+			action.metadata = vim.tbl_extend("force", action.metadata, extra.metadata)
 		end
 		action.metadata.old_name = extra.old_name or extra.from or action.metadata.old_name
 		action.metadata.new_name = extra.new_name or extra.to or action.metadata.new_name
 		action.metadata.from_line = extra.from_line or action.metadata.from_line
 		action.metadata.to_line = extra.to_line or action.metadata.to_line
+		action.metadata.node_type = extra.node_type or action.metadata.node_type
+		action.metadata.suppressed_renames = extra.suppressed_renames or action.metadata.suppressed_renames
 		if extra.context and extra.context.suppressed_usages then
 			action.metadata.suppressed_renames = extra.context.suppressed_usages
 		end
@@ -515,8 +524,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		-- If a declaration rename exists for a pair, suppress usage-level duplicates for that pair.
 		local declaration_pairs = {}
 		for _, rename_action in ipairs(renames) do
-			local from_name = rename_action.metadata and rename_action.metadata.old_name or rename_action.from
-			local to_name = rename_action.metadata and rename_action.metadata.new_name or rename_action.to
+			local metadata = rename_action.metadata or {}
+			local from_name = metadata.old_name
+			local to_name = metadata.new_name
 			if rename_action.context and rename_action.context.declaration then
 				declaration_pairs[pair_key(from_name, to_name)] = true
 			end
@@ -525,8 +535,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		local suppressed_by_pair = {}
 		local filtered_renames = {}
 		for _, rename_action in ipairs(renames) do
-			local from_name = rename_action.metadata and rename_action.metadata.old_name or rename_action.from
-			local to_name = rename_action.metadata and rename_action.metadata.new_name or rename_action.to
+			local metadata = rename_action.metadata or {}
+			local from_name = metadata.old_name
+			local to_name = metadata.new_name
 			local key = pair_key(from_name, to_name)
 			local is_declaration = rename_action.context and rename_action.context.declaration
 			if not declaration_pairs[key] or is_declaration then
@@ -534,13 +545,14 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			else
 				suppressed_by_pair[key] = suppressed_by_pair[key] or {}
 				table.insert(suppressed_by_pair[key], {
-					from = from_name,
-					to = to_name,
 					src = rename_action.src,
 					dst = rename_action.dst,
-					src_range = rename_action.src or rename_action.src_range,
-					dst_range = rename_action.dst or rename_action.dst_range,
-					lines = rename_action.lines,
+					metadata = {
+						old_name = from_name,
+						new_name = to_name,
+						from_line = metadata.from_line,
+						to_line = metadata.to_line,
+					},
 					context = rename_action.context,
 				})
 			end
@@ -548,8 +560,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 
 		for _, rename_action in ipairs(filtered_renames) do
 			if rename_action.context and rename_action.context.declaration then
-				local from_name = rename_action.metadata and rename_action.metadata.old_name or rename_action.from
-				local to_name = rename_action.metadata and rename_action.metadata.new_name or rename_action.to
+				local metadata = rename_action.metadata or {}
+				local from_name = metadata.old_name
+				local to_name = metadata.new_name
 				local key = pair_key(from_name, to_name)
 				local suppressed_usages = suppressed_by_pair[key]
 				if suppressed_usages and #suppressed_usages > 0 then

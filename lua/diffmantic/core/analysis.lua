@@ -231,8 +231,9 @@ local function collect_suppressed_rename_pairs(actions)
 	local declaration_pairs = {}
 	for _, action in ipairs(actions) do
 		if action.type == "rename" then
-			local old_name = action.metadata and action.metadata.old_name or action.from
-			local new_name = action.metadata and action.metadata.new_name or action.to
+			local metadata = action.metadata or {}
+			local old_name = metadata.old_name
+			local new_name = metadata.new_name
 			if action.context and action.context.declaration and old_name and new_name and old_name ~= new_name then
 				declaration_pairs[old_name] = new_name
 			end
@@ -240,8 +241,8 @@ local function collect_suppressed_rename_pairs(actions)
 			local suppressed = action.metadata and action.metadata.suppressed_renames or nil
 			if suppressed then
 				for _, usage in ipairs(suppressed) do
-					local src = clone_range_like(usage.src or usage.src_range)
-					local dst = clone_range_like(usage.dst or usage.dst_range)
+					local src = clone_range_like(usage.src)
+					local dst = clone_range_like(usage.dst)
 					if src and dst then
 						table.insert(pairs, { src = src, dst = dst })
 					end
