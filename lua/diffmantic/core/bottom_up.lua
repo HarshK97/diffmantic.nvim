@@ -289,10 +289,10 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 
 	local function is_identifier_type(info, role_index)
 		if
-			roles.has_kind(info.node, role_index, "function")
-			or roles.has_kind(info.node, role_index, "class")
-			or roles.has_kind(info.node, role_index, "variable")
-			or roles.has_kind(info.node, role_index, "assignment")
+			roles.has_structural_kind(info.node, role_index, "function")
+			or roles.has_structural_kind(info.node, role_index, "class")
+			or roles.has_structural_kind(info.node, role_index, "variable")
+			or roles.has_structural_kind(info.node, role_index, "assignment")
 		then
 			return true
 		end
@@ -300,7 +300,10 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 	end
 
 	local function is_unique_structure_fallback_type(info, role_index)
-		if roles.has_kind(info.node, role_index, "function") or roles.has_kind(info.node, role_index, "class") then
+		if
+			roles.has_structural_kind(info.node, role_index, "function")
+			or roles.has_structural_kind(info.node, role_index, "class")
+		then
 			return true
 		end
 		return unique_structure_fallback_types[info.type] or false

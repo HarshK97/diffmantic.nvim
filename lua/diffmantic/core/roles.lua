@@ -26,6 +26,16 @@ local CAPTURE_BY_KIND = {
 	["rename_identifier"] = { "diff.identifier.rename" },
 }
 
+local STRUCTURAL_CAPTURE_BY_KIND = {
+	["function"] = { "diff.function.outer" },
+	["class"] = { "diff.class.outer" },
+	["variable"] = { "diff.variable.outer" },
+	["assignment"] = { "diff.assignment.outer" },
+	["import"] = { "diff.import.outer" },
+	["return"] = { "diff.return.outer" },
+	["preproc"] = { "diff.preproc.outer" },
+}
+
 local FALLBACK_QUERY = "((_) @diff.fallback.node)"
 
 local function add_capture(index, capture, node)
@@ -117,6 +127,21 @@ function M.has_kind(node, index, kind)
 	local captures = CAPTURE_BY_KIND[kind]
 	if not captures then
 		return false
+	end
+
+	for _, capture in ipairs(captures) do
+		if M.has_capture(node, index, capture) then
+			return true
+		end
+	end
+
+	return false
+end
+
+function M.has_structural_kind(node, index, kind)
+	local captures = STRUCTURAL_CAPTURE_BY_KIND[kind]
+	if not captures then
+		return M.has_kind(node, index, kind)
 	end
 
 	for _, capture in ipairs(captures) do

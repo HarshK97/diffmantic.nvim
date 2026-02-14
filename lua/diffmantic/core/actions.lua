@@ -642,10 +642,26 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	}
 
 	local function has_kind(node, index, kind)
-		return index and roles.has_kind(node, index, kind) or false
+		return index and roles.has_structural_kind(node, index, kind) or false
 	end
 
+	local function has_role_captures(index)
+		if not index or not index.by_capture then
+			return false
+		end
+		for capture, _ in pairs(index.by_capture) do
+			if capture ~= "diff.fallback.node" then
+				return true
+			end
+		end
+		return false
+	end
+
+	local src_uses_roles = has_role_captures(src_role_index)
+	local dst_uses_roles = has_role_captures(dst_role_index)
+
 	local function is_significant(info, index)
+		local uses_roles = (index == src_role_index and src_uses_roles) or (index == dst_role_index and dst_uses_roles)
 		local node = info.node
 		if has_kind(node, index, "function")
 			or has_kind(node, index, "class")
@@ -657,19 +673,30 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		then
 			return true
 		end
+		if uses_roles then
+			return false
+		end
 		return significant_types[info.type] or false
 	end
 
 	local function is_transparent_update_ancestor(info, index)
+		local uses_roles = (index == src_role_index and src_uses_roles) or (index == dst_role_index and dst_uses_roles)
 		if has_kind(info.node, index, "class") then
 			return true
+		end
+		if uses_roles then
+			return false
 		end
 		return transparent_update_ancestors[info.type] or false
 	end
 
 	local function is_movable(info, index)
+		local uses_roles = (index == src_role_index and src_uses_roles) or (index == dst_role_index and dst_uses_roles)
 		if has_kind(info.node, index, "function") or has_kind(info.node, index, "class") then
 			return true
+		end
+		if uses_roles then
+			return false
 		end
 		return movable_types[info.type] or false
 	end
