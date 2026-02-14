@@ -19,24 +19,18 @@ local function range_metadata(node)
 end
 
 local function build_action(action_type, src_node, dst_node, extra)
-	local src_range = range_metadata(src_node)
-	local dst_range = range_metadata(dst_node)
+	local src = range_metadata(src_node)
+	local dst = range_metadata(dst_node)
 	local node = src_node or dst_node
-	local from_line = src_range and src_range.start_line or nil
-	local to_line = dst_range and dst_range.start_line or nil
+	local from_line = src and src.start_line or nil
+	local to_line = dst and dst.start_line or nil
 
 	local action = {
 		type = action_type,
 		src_node = src_node,
 		dst_node = dst_node,
-		src_range = src_range,
-		dst_range = dst_range,
-		src = src_range and vim.tbl_extend("force", {}, src_range, { text = nil }) or nil,
-		dst = dst_range and vim.tbl_extend("force", {}, dst_range, { text = nil }) or nil,
-		lines = {
-			from_line = from_line,
-			to_line = to_line,
-		},
+		src = src and vim.tbl_extend("force", {}, src, { text = nil }) or nil,
+		dst = dst and vim.tbl_extend("force", {}, dst, { text = nil }) or nil,
 		metadata = {
 			node_type = node and node:type() or nil,
 			old_name = nil,
@@ -89,65 +83,70 @@ local function build_summary(actions_list)
 		end
 
 		if t == "move" then
+			local metadata = action.metadata or {}
 			table.insert(summary.moves, {
-				node_type = action.metadata and action.metadata.node_type or nil,
-				from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
-				to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
-				src_range = action.src or action.src_range,
-				dst_range = action.dst or action.dst_range,
+				node_type = metadata.node_type,
+				from_line = metadata.from_line,
+				to_line = metadata.to_line,
+				src_range = action.src,
+				dst_range = action.dst,
 			})
 		elseif t == "rename" then
-			local suppressed_usages = action.metadata and action.metadata.suppressed_renames
-				or (action.context and action.context.suppressed_usages or {})
+			local metadata = action.metadata or {}
+			local suppressed_usages = metadata.suppressed_renames or (action.context and action.context.suppressed_usages or {})
 			local suppressed_count = #suppressed_usages
 			summary.counts.rename_suppressed = summary.counts.rename_suppressed + suppressed_count
 
 			table.insert(summary.renames, {
-				node_type = action.metadata and action.metadata.node_type or nil,
-				from = action.metadata and action.metadata.old_name or action.from,
-				to = action.metadata and action.metadata.new_name or action.to,
-				from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
-				to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
-				src_range = action.src or action.src_range,
-				dst_range = action.dst or action.dst_range,
+				node_type = metadata.node_type,
+				from = metadata.old_name,
+				to = metadata.new_name,
+				from_line = metadata.from_line,
+				to_line = metadata.to_line,
+				src_range = action.src,
+				dst_range = action.dst,
 				suppressed_usage_count = suppressed_count,
 			})
 
 			for _, usage in ipairs(suppressed_usages) do
+				local usage_meta = usage.metadata or {}
 				table.insert(summary.suppressed_renames, {
-					from = usage.from,
-					to = usage.to,
-					from_line = usage.lines and usage.lines.from_line or nil,
-					to_line = usage.lines and usage.lines.to_line or nil,
-					src_range = usage.src or usage.src_range,
-					dst_range = usage.dst or usage.dst_range,
+					from = usage_meta.old_name,
+					to = usage_meta.new_name,
+					from_line = usage_meta.from_line,
+					to_line = usage_meta.to_line,
+					src_range = usage.src,
+					dst_range = usage.dst,
 					suppressed_by = {
-						from = action.metadata and action.metadata.old_name or action.from,
-						to = action.metadata and action.metadata.new_name or action.to,
-						from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
-						to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
+						from = metadata.old_name,
+						to = metadata.new_name,
+						from_line = metadata.from_line,
+						to_line = metadata.to_line,
 					},
 				})
 			end
 		elseif t == "update" then
+			local metadata = action.metadata or {}
 			table.insert(summary.updates, {
-				node_type = action.metadata and action.metadata.node_type or nil,
-				from_line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
-				to_line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
-				src_range = action.src or action.src_range,
-				dst_range = action.dst or action.dst_range,
+				node_type = metadata.node_type,
+				from_line = metadata.from_line,
+				to_line = metadata.to_line,
+				src_range = action.src,
+				dst_range = action.dst,
 			})
 		elseif t == "insert" then
+			local metadata = action.metadata or {}
 			table.insert(summary.inserts, {
-				node_type = action.metadata and action.metadata.node_type or nil,
-				line = action.metadata and action.metadata.to_line or (action.lines and action.lines.to_line or nil),
-				dst_range = action.dst or action.dst_range,
+				node_type = metadata.node_type,
+				line = metadata.to_line,
+				dst_range = action.dst,
 			})
 		elseif t == "delete" then
+			local metadata = action.metadata or {}
 			table.insert(summary.deletes, {
-				node_type = action.metadata and action.metadata.node_type or nil,
-				line = action.metadata and action.metadata.from_line or (action.lines and action.lines.from_line or nil),
-				src_range = action.src or action.src_range,
+				node_type = metadata.node_type,
+				line = metadata.from_line,
+				src_range = action.src,
 			})
 		end
 	end
