@@ -2,6 +2,29 @@ local ts_utils = require("diffmantic.treesitter")
 
 local M = {}
 
+local function node_key(node)
+	local sr, sc, er, ec = node:range()
+	return sr, sc, er, ec
+end
+
+local function compare_node_order(a, b)
+	local asr, asc, aer, aec = node_key(a.node)
+	local bsr, bsc, ber, bec = node_key(b.node)
+	if asr ~= bsr then
+		return asr < bsr
+	end
+	if asc ~= bsc then
+		return asc < bsc
+	end
+	if aer ~= ber then
+		return aer < ber
+	end
+	if aec ~= bec then
+		return aec < bec
+	end
+	return a.type < b.type
+end
+
 -- Top-down matching: match nodes from the top of the tree downwards
 -- Matches nodes with the same hash at each height level
 function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
@@ -21,6 +44,11 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 			end
 			table.insert(by_height[data.height], data)
 		end
+
+		for _, nodes in pairs(by_height) do
+			table.sort(nodes, compare_node_order)
+		end
+
 		return by_height
 	end
 	local src_by_height = get_nodes_by_height(src_info)

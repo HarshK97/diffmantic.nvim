@@ -3,23 +3,75 @@ local core = require("diffmantic.core")
 local ui = require("diffmantic.ui")
 local debug_utils = require("diffmantic.debug_utils")
 
-local function setup_highlights()
-	local add_fg = vim.api.nvim_get_hl(0, { name = "DiffAdd" }).fg or 0xa6e3a1
-	local delete_fg = vim.api.nvim_get_hl(0, { name = "DiffDelete" }).fg or 0xf38ba8
-	local change_fg = vim.api.nvim_get_hl(0, { name = "DiffChange" }).fg or 0xf9e2af
+local function hl(name)
+	local ok, value = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+	if not ok then
+		return {}
+	end
+	return value or {}
+end
 
-	vim.api.nvim_set_hl(0, "DiffAddText", { fg = add_fg, bg = "NONE", ctermbg = "NONE" })
-	vim.api.nvim_set_hl(0, "DiffDeleteText", { fg = delete_fg, bg = "NONE", ctermbg = "NONE" })
-	vim.api.nvim_set_hl(0, "DiffChangeText", { fg = change_fg, bg = "NONE", ctermbg = "NONE" })
-	vim.api.nvim_set_hl(0, "DiffMoveText", { fg = 0x89b4fa, bg = "NONE", ctermbg = "NONE" })
-	vim.api.nvim_set_hl(0, "DiffRenameText", { fg = change_fg, bg = "NONE", ctermbg = "NONE", underline = true })
+local function pick_bg(names)
+	for _, name in ipairs(names) do
+		local value = hl(name).bg
+		if value then
+			return value
+		end
+	end
+	return nil
+end
+
+local function pick_fg(names, fallback)
+	for _, name in ipairs(names) do
+		local value = hl(name).fg
+		if value then
+			return value
+		end
+	end
+	return fallback
+end
+
+local function setup_highlights()
+	local add_bg = pick_bg({ "DiffAdd", "DiffText" })
+	local delete_bg = pick_bg({ "DiffDelete", "DiffText" })
+	local change_bg = pick_bg({ "DiffText", "DiffChange" })
+	local move_bg = pick_bg({ "DiffText", "DiffChange" })
+
+	local add_sign_fg = pick_fg({ "DiffAdd" }, 0x49D17D)
+	local delete_sign_fg = pick_fg({ "DiffDelete" }, 0xFF6B6B)
+	local change_sign_fg = pick_fg({ "DiagnosticWarn", "DiffChange" }, 0xE8C95A)
+	local move_sign_fg = pick_fg({ "DiagnosticInfo", "DiffText" }, 0x5AA2FF)
+
+	vim.api.nvim_set_hl(0, "DiffmanticAdd", { fg = add_sign_fg, bg = add_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticDelete", { fg = delete_sign_fg, bg = delete_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticChange", { fg = change_sign_fg, bg = change_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticMove", { fg = move_sign_fg, bg = move_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticRename", { fg = change_sign_fg, underline = true, bold = true, italic = true })
+
+	vim.api.nvim_set_hl(0, "DiffmanticAddSign", { fg = add_sign_fg, bg = "NONE" })
+	vim.api.nvim_set_hl(0, "DiffmanticDeleteSign", { fg = delete_sign_fg, bg = "NONE" })
+	vim.api.nvim_set_hl(0, "DiffmanticChangeSign", { fg = change_sign_fg, bg = "NONE" })
+	vim.api.nvim_set_hl(0, "DiffmanticMoveSign", { fg = move_sign_fg, bg = "NONE" })
+	vim.api.nvim_set_hl(0, "DiffmanticRenameSign", { fg = change_sign_fg, bg = "NONE" })
+
+	vim.api.nvim_set_hl(0, "DiffmanticAddFiller", { fg = add_sign_fg, bg = add_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticDeleteFiller", { fg = delete_sign_fg, bg = delete_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticMoveFiller", { fg = move_sign_fg, bg = move_bg })
+
 end
 
 function M.setup(opts)
 	setup_highlights()
+
+	local aug = vim.api.nvim_create_augroup("diffmantic_highlights", { clear = true })
+	vim.api.nvim_create_autocmd("ColorScheme", {
+		group = aug,
+		callback = setup_highlights,
+	})
 end
 
 function M.diff(args)
+	setup_highlights()
 	local parts = vim.split(args, " ", { trimempty = true })
 	if #parts == 0 then
 		print("Please provide one or two files paths to compare.")
@@ -28,36 +80,27 @@ function M.diff(args)
 
 	local file1, file2 = parts[1], parts[2]
 	local buf1, buf2
+	local win1, win2
 
 	if file2 then
 		-- Case: 2 files provided. Open them in split.
 		vim.cmd("tabnew")
 		vim.cmd("edit " .. file1)
 		buf1 = vim.api.nvim_get_current_buf()
-		local win1 = vim.api.nvim_get_current_win()
+		win1 = vim.api.nvim_get_current_win()
 
 		vim.cmd("vsplit " .. file2)
 		buf2 = vim.api.nvim_get_current_buf()
-		local win2 = vim.api.nvim_get_current_win()
-
-		vim.wo[win1].scrollbind = true
-		vim.wo[win1].cursorbind = true
-		vim.wo[win2].scrollbind = true
-		vim.wo[win2].cursorbind = true
+		win2 = vim.api.nvim_get_current_win()
 	else
 		-- Case: 1 file provided. Compare current buffer vs file.
 		buf1 = vim.api.nvim_get_current_buf()
-		local win1 = vim.api.nvim_get_current_win()
+		win1 = vim.api.nvim_get_current_win()
 		local expanded_path = vim.fn.expand(file1)
 
 		vim.cmd("vsplit " .. expanded_path)
 		buf2 = vim.api.nvim_get_current_buf()
-		local win2 = vim.api.nvim_get_current_win()
-
-		vim.wo[win1].scrollbind = true
-		vim.wo[win1].cursorbind = true
-		vim.wo[win2].scrollbind = true
-		vim.wo[win2].cursorbind = true
+		win2 = vim.api.nvim_get_current_win()
 	end
 
 	local lang = vim.treesitter.language.get_lang(vim.bo[buf1].filetype)
@@ -86,11 +129,21 @@ function M.diff(args)
 	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2)
 	-- debug_utils.print_recovery_mappings(mappings, before_recovery, src_info, dst_info, buf1, buf2)
 
-	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info)
+	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info, {
+		src_buf = buf1,
+		dst_buf = buf2,
+	})
 
 	-- debug_utils.print_actions(actions, buf1, buf2)
 	-- debug_utils.print_mappings(mappings, src_info, dst_info, buf1, buf2)
 	ui.apply_highlights(buf1, buf2, actions)
+
+	vim.api.nvim_win_set_cursor(win1, { 1, 0 })
+	vim.api.nvim_win_set_cursor(win2, { 1, 0 })
+	vim.wo[win1].scrollbind = true
+	vim.wo[win1].cursorbind = true
+	vim.wo[win2].scrollbind = true
+	vim.wo[win2].cursorbind = true
 end
 
 return M

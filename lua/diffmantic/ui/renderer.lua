@@ -1,330 +1,172 @@
-local helpers = require("diffmantic.ui.helpers")
+local signs = require("diffmantic.ui.signs")
+local filler = require("diffmantic.ui.filler")
 
 local M = {}
 
+local HL_PRIORITY = {
+	DiffmanticMove = 10,
+	DiffmanticAdd = 20,
+	DiffmanticDelete = 20,
+	DiffmanticChange = 30,
+	DiffmanticRename = 40,
+}
+
+local function set_extmark(buf, ns, row, col, opts)
+	if opts and opts.hl_group and not opts.priority then
+		opts.priority = HL_PRIORITY[opts.hl_group] or 20
+	end
+	return pcall(vim.api.nvim_buf_set_extmark, buf, ns, row, col, opts)
+end
+
+local function apply_span(buf, ns, range, hl_group)
+	if not range or not hl_group then
+		return
+	end
+	local sr = range.start_row
+	local sc = range.start_col
+	local er = range.end_row or sr
+	local ec = range.end_col
+	if sr == nil or sc == nil or ec == nil then
+		return
+	end
+	if sr == er and ec <= sc then
+		ec = sc + 1
+	end
+	set_extmark(buf, ns, sr, sc, {
+		end_row = er,
+		end_col = ec,
+		hl_group = hl_group,
+	})
+end
+
+local function apply_sign(buf, ns, row, text, hl_group, seen_rows)
+	if row == nil or not text or not hl_group then
+		return
+	end
+	signs.mark(buf, ns, row, 0, text, hl_group, seen_rows)
+end
+
+local function apply_virt(buf, ns, row, col, text, hl_group, pos)
+	if row == nil or not text then
+		return
+	end
+	local opts = {
+		virt_text = { { text, hl_group or "Comment" } },
+		virt_text_pos = pos or "eol",
+	}
+	local ok = set_extmark(buf, ns, row, col or 0, opts)
+	if not ok and opts.virt_text_pos == "inline" then
+		opts.virt_text_pos = "eol"
+		set_extmark(buf, ns, row, col or 0, opts)
+	end
+end
+
+local TYPE_STYLE = {
+	move = { hl = "DiffmanticMove", sign = "M" },
+	rename = { hl = "DiffmanticRename", sign = "R" },
+	update = { hl = "DiffmanticChange", sign = "U" },
+	insert = { hl = "DiffmanticAdd", sign = "+" },
+	delete = { hl = "DiffmanticDelete", sign = "-" },
+}
+
+local HUNK_STYLE = {
+	change = {
+		src_hl = "DiffmanticChange",
+		dst_hl = "DiffmanticChange",
+		src_sign = "U",
+		dst_sign = "U",
+	},
+	insert = {
+		src_hl = nil,
+		dst_hl = "DiffmanticAdd",
+		src_sign = nil,
+		dst_sign = "+",
+	},
+	delete = {
+		src_hl = "DiffmanticDelete",
+		dst_hl = nil,
+		src_sign = "-",
+		dst_sign = nil,
+	},
+}
+
+local function move_to_arrow(from_line, to_line)
+	if type(from_line) ~= "number" or type(to_line) ~= "number" then
+		return "⤴"
+	end
+	if to_line > from_line then
+		return "⤵"
+	end
+	return "⤴"
+end
+
 function M.render(src_buf, dst_buf, actions, ns)
-	-- Suppress insert/delete inside moved/updated ranges.
-	local src_suppress = {}
-	local dst_suppress = {}
-	local rename_map = {}
-
-	local function add_range(ranges, node)
-		if not node then
-			return
-		end
-		local sr, _, er, _ = node:range()
-		table.insert(ranges, { start_row = sr, end_row = er })
-	end
+	local src_sign_rows = {}
+	local dst_sign_rows = {}
+	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf)
+	filler.apply(src_buf, ns, src_fillers)
+	filler.apply(dst_buf, ns, dst_fillers)
 
 	for _, action in ipairs(actions) do
-		if action.type == "move" or action.type == "update" then
-			add_range(src_suppress, action.node)
-			add_range(dst_suppress, action.target)
-		end
-	end
+		local style = TYPE_STYLE[action.type]
+		if style then
+			local src = action.src
+			local dst = action.dst
+			local meta = action.metadata or {}
 
-	for _, action in ipairs(actions) do
-		if action.type == "update" then
-			local leaf_changes = helpers.find_leaf_changes(action.node, action.target, src_buf, dst_buf)
-			for _, change in ipairs(leaf_changes) do
-				if helpers.is_rename_identifier(change.src_node) or helpers.is_rename_identifier(change.dst_node) then
-					rename_map[change.src_text] = change.dst_text
-				end
-			end
-		end
-	end
-
-	local function is_suppressed(ranges, node)
-		if not node then
-			return false
-		end
-		local sr, _, er, _ = node:range()
-		for _, range in ipairs(ranges) do
-			if sr >= range.start_row and er <= range.end_row then
-				return true
-			end
-		end
-		return false
-	end
-
-	for _, action in ipairs(actions) do
-		local node = action.node
-		local sr, sc, er, ec = node:range()
-
-		if action.type == "move" then
-			local target = action.target
-			local tr, tc, ter, tec = target:range()
-			local src_line = sr + 1
-			local dst_line = tr + 1
-
-			pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, sr, sc, {
-				end_row = er,
-				end_col = ec,
-				hl_group = "DiffMoveText",
-				virt_text = { { string.format(" ⤷ moved L%d → L%d", src_line, dst_line), "Comment" } },
-				virt_text_pos = "eol",
-				sign_text = "M",
-				sign_hl_group = "DiffMoveText",
-			})
-			pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, tr, tc, {
-				end_row = ter,
-				end_col = tec,
-				hl_group = "DiffMoveText",
-				virt_text = { { string.format(" ⤶ from L%d", src_line), "Comment" } },
-				virt_text_pos = "eol",
-				sign_text = "M",
-				sign_hl_group = "DiffMoveText",
-			})
-		elseif action.type == "update" then
-			local target = action.target
-			local tr, tc, ter, tec = target:range()
-
-			local leaf_changes = helpers.find_leaf_changes(node, target, src_buf, dst_buf)
-
-			local signs_src = {}
-			local signs_dst = {}
-			if #leaf_changes > 0 then
-				local rename_signs = {}
-				local rename_signs_src = {}
-				local rename_inline_src = {}
-				local rename_inline_dst = {}
-				local update_signs_dst = {}
-				local update_signs_src = {}
-				local rename_pairs = {}
-
-				for src_text, dst_text in pairs(rename_map) do
-					rename_pairs[src_text] = dst_text
-				end
-
-				for _, change in ipairs(leaf_changes) do
-					local src_node = change.src_node
-					local dst_node = change.dst_node
-					if helpers.is_rename_identifier(src_node) or helpers.is_rename_identifier(dst_node) then
-						rename_pairs[change.src_text] = change.dst_text
+			if action.type == "update" and action.analysis and action.analysis.hunks then
+				local rendered_hunk = false
+				for _, hunk in ipairs(action.analysis.hunks) do
+					local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
+					if hunk.src and hstyle.src_hl then
+						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
+						apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
+						rendered_hunk = true
+					end
+					if hunk.dst and hstyle.dst_hl then
+						apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
+						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
+						rendered_hunk = true
 					end
 				end
-
-				for _, change in ipairs(leaf_changes) do
-					local src_node = change.src_node
-					local dst_node = change.dst_node
-					local ctr, ctc, cter, ctec = dst_node:range()
-					local csr, csc, cser, csec = src_node:range()
-
-					local is_rename_ref = false
-					if not (helpers.is_rename_identifier(src_node) or helpers.is_rename_identifier(dst_node)) then
-						local src_type = src_node:type()
-						local dst_type = dst_node:type()
-						if
-							(
-								src_type == "identifier"
-								or src_type == "field_identifier"
-								or src_type == "type_identifier"
-							)
-							and (dst_type == "identifier" or dst_type == "field_identifier" or dst_type == "type_identifier")
-							and (
-								rename_pairs[change.src_text] == change.dst_text
-								or rename_map[change.src_text] == change.dst_text
-							)
-						then
-							is_rename_ref = true
-						end
+				if not rendered_hunk then
+					if src then
+						apply_span(src_buf, ns, src, style.hl)
+						apply_sign(src_buf, ns, src.start_row, style.sign, style.hl, src_sign_rows)
 					end
-
-					if is_rename_ref then
-						-- Identifier usage changed only due to rename; ignore to avoid noise.
-						goto continue_leaf
+					if dst then
+						apply_span(dst_buf, ns, dst, style.hl)
+						apply_sign(dst_buf, ns, dst.start_row, style.sign, style.hl, dst_sign_rows)
 					end
-
-					if helpers.is_rename_identifier(src_node) or helpers.is_rename_identifier(dst_node) then
-						-- Rename: highlight identifier with inline "was"/"->".
-						if not rename_signs_src[csr] then
-							rename_signs_src[csr] = true
-							signs_src[csr] = true
-							pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc, {
-								end_row = cser,
-								end_col = csec,
-								hl_group = "DiffRenameText",
-								sign_text = "R",
-								sign_hl_group = "DiffRenameText",
-							})
-						else
-							pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc, {
-								end_row = cser,
-								end_col = csec,
-								hl_group = "DiffChangeText",
-							})
-						end
-
-						if not rename_signs[ctr] then
-							rename_signs[ctr] = true
-							signs_dst[ctr] = true
-							pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc, {
-								end_row = cter,
-								end_col = ctec,
-								hl_group = "DiffRenameText",
-								sign_text = "R",
-								sign_hl_group = "DiffRenameText",
-							})
-						else
-							signs_dst[ctr] = true
-							pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc, {
-								end_row = cter,
-								end_col = ctec,
-								hl_group = "DiffChangeText",
-							})
-						end
-						local src_key = tostring(src_node:id())
-						if not rename_inline_src[src_key] then
-							rename_inline_src[src_key] = true
-							helpers.set_inline_virt_text(src_buf, ns, csr, csec, " -> " .. change.dst_text, "Comment")
-						end
-						local dst_key = tostring(dst_node:id())
-						if not rename_inline_dst[dst_key] then
-							rename_inline_dst[dst_key] = true
-							helpers.set_inline_virt_text(
-								dst_buf,
-								ns,
-								ctr,
-								ctec,
-								string.format(" (was %s)", change.src_text),
-								"Comment"
-							)
-						end
-					elseif
-						helpers.is_value_node(src_node, change.src_text)
-						or helpers.is_value_node(dst_node, change.dst_text)
-					then
-						-- Value change: micro-diff only (no virtual text).
-						local fragment = helpers.diff_fragment(change.src_text, change.dst_text)
-						if fragment then
-							local rel_start = fragment.new_start - 1
-							local rel_end = fragment.new_end
-							if cter == ctr then
-								pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc + rel_start, {
-									end_row = cter,
-									end_col = ctc + rel_end,
-									hl_group = "DiffChange",
-								})
-							end
-							if cser == csr then
-								pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc + fragment.old_start - 1, {
-									end_row = cser,
-									end_col = csc + fragment.old_end,
-									hl_group = "DiffChange",
-								})
-							end
-
-							if not update_signs_dst[ctr] then
-								update_signs_dst[ctr] = true
-								signs_dst[ctr] = true
-								pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc + rel_end, {
-									sign_text = "U",
-									sign_hl_group = "DiffChangeText",
-								})
-							end
-							if not update_signs_src[csr] then
-								update_signs_src[csr] = true
-								signs_src[csr] = true
-								pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc + fragment.old_end, {
-									sign_text = "U",
-									sign_hl_group = "DiffChangeText",
-								})
-							end
-						else
-							pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc, {
-								end_row = cter,
-								end_col = ctec,
-								hl_group = "DiffChange",
-								sign_text = "U",
-								sign_hl_group = "DiffChangeText",
-							})
-							if cser == csr then
-								if not update_signs_src[csr] then
-									update_signs_src[csr] = true
-									signs_src[csr] = true
-									pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc, {
-										end_row = cser,
-										end_col = csec,
-										hl_group = "DiffChange",
-										sign_text = "U",
-										sign_hl_group = "DiffChangeText",
-									})
-								else
-									pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc, {
-										end_row = cser,
-										end_col = csec,
-										hl_group = "DiffChange",
-									})
-								end
-							end
-						end
-					else
-						if cser >= csr then
-							pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc, {
-								end_row = cser,
-								end_col = csec,
-								hl_group = "DiffChangeText",
-							})
-						end
-						if cter >= ctr then
-							pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc, {
-								end_row = cter,
-								end_col = ctec,
-								hl_group = "DiffChangeText",
-							})
-						end
-						if not update_signs_src[csr] then
-							update_signs_src[csr] = true
-							signs_src[csr] = true
-							pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, csr, csc, {
-								sign_text = "U",
-								sign_hl_group = "DiffChangeText",
-							})
-						end
-						if not update_signs_dst[ctr] then
-							update_signs_dst[ctr] = true
-							signs_dst[ctr] = true
-							pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, ctr, ctc, {
-								sign_text = "U",
-								sign_hl_group = "DiffChangeText",
-							})
-						end
-					end
-
-					::continue_leaf::
 				end
 			else
-				helpers.highlight_internal_diff(node, target, src_buf, dst_buf, ns, {
-					signs_src = signs_src,
-					signs_dst = signs_dst,
-					rename_map = rename_map,
-				})
-			end
-		elseif action.type == "delete" then
-			if is_suppressed(src_suppress, node) and node:type() ~= "field_declaration" then
-				goto continue_action
-			end
-			pcall(vim.api.nvim_buf_set_extmark, src_buf, ns, sr, sc, {
-				end_row = er,
-				end_col = ec,
-				hl_group = "DiffDeleteText",
-				sign_text = "-",
-				sign_hl_group = "DiffDeleteText",
-			})
-		elseif action.type == "insert" then
-			if is_suppressed(dst_suppress, node) and node:type() ~= "field_declaration" then
-				goto continue_action
-			end
-			pcall(vim.api.nvim_buf_set_extmark, dst_buf, ns, sr, sc, {
-				end_row = er,
-				end_col = ec,
-				hl_group = "DiffAddText",
-				sign_text = "+",
-				sign_hl_group = "DiffAddText",
-			})
-		end
+				if src then
+					apply_span(src_buf, ns, src, style.hl)
+					apply_sign(src_buf, ns, src.start_row, style.sign, style.hl, src_sign_rows)
+				end
+				if dst then
+					apply_span(dst_buf, ns, dst, style.hl)
+					apply_sign(dst_buf, ns, dst.start_row, style.sign, style.hl, dst_sign_rows)
+				end
 
-		::continue_action::
+				if action.type == "move" then
+					if src and meta.to_line then
+						local arrow = move_to_arrow(meta.from_line, meta.to_line)
+						apply_virt(src_buf, ns, src.start_row, src.end_col or 0, string.format(" %s moved to L%d", arrow, meta.to_line), "Comment", "eol")
+					end
+					if dst and meta.from_line then
+						apply_virt(dst_buf, ns, dst.start_row, dst.end_col or 0, string.format(" ⤶ from L%d", meta.from_line), "Comment", "eol")
+					end
+				elseif action.type == "rename" then
+					if src and meta.new_name then
+						apply_virt(src_buf, ns, src.start_row, src.end_col or 0, " -> " .. meta.new_name, "Comment", "inline")
+					end
+					if dst and meta.old_name then
+						apply_virt(dst_buf, ns, dst.start_row, dst.end_col or 0, string.format(" (was %s)", meta.old_name), "Comment", "inline")
+					end
+				end
+			end
+		end
 	end
 end
 
