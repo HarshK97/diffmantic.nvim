@@ -9,11 +9,11 @@ local SIGN_GROUP_BY_TEXT_GROUP = {
 }
 
 local SIGN_PRIORITY_BY_TEXT_GROUP = {
-	DiffmanticAdd = 10,
-	DiffmanticDelete = 10,
+	DiffmanticAdd = 40,
+	DiffmanticDelete = 40,
 	DiffmanticChange = 20,
-	DiffmanticMove = 30,
-	DiffmanticRename = 40,
+	DiffmanticMove = 10,
+	DiffmanticRename = 30,
 }
 
 function M.glyph()
