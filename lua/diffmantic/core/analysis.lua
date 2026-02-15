@@ -421,6 +421,7 @@ function M.enrich(actions, opts)
 			local rename_pairs = action.analysis and action.analysis.rename_pairs or {}
 			local normalized_leaf = {}
 			local hunks = {}
+			local has_non_rename_change = false
 
 			for _, change in ipairs(raw_leaf_changes) do
 				local src_range = range_metadata(change.src_node)
@@ -433,6 +434,7 @@ function M.enrich(actions, opts)
 				})
 
 				if change.src_text ~= change.dst_text and rename_pairs[change.src_text] ~= change.dst_text then
+					has_non_rename_change = true
 					local hunk_src = src_range
 					local hunk_dst = dst_range
 
@@ -474,7 +476,9 @@ function M.enrich(actions, opts)
 				end
 			end
 
-			if #hunks == 0 then
+			local rename_only = (#normalized_leaf > 0) and (next(rename_pairs) ~= nil) and not has_non_rename_change
+
+			if #hunks == 0 and not rename_only then
 				hunks = fallback_hunks_from_diff(action.src_node, action.dst_node, src_buf, dst_buf, rename_pairs)
 			end
 			if #suppressed_pairs > 0 and #hunks > 0 then
@@ -501,6 +505,7 @@ function M.enrich(actions, opts)
 				leaf_changes = normalized_leaf,
 				rename_pairs = rename_pairs,
 				hunks = hunks,
+				rename_only = rename_only,
 			}
 		end
 	end

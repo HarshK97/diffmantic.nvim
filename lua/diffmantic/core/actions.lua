@@ -923,6 +923,23 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 	stop_timer(analysis_start, "analysis")
 
+	local update_suppress_start = start_timer()
+	local filtered_actions = {}
+	for _, action in ipairs(actions) do
+		if action.type == "update" then
+			local action_analysis = action.analysis or {}
+			local has_hunks = action_analysis.hunks and #action_analysis.hunks > 0
+			local has_rename_pairs = action_analysis.rename_pairs and next(action_analysis.rename_pairs) ~= nil
+			if action_analysis.rename_only and has_rename_pairs and not has_hunks then
+				goto continue
+			end
+		end
+		table.insert(filtered_actions, action)
+		::continue::
+	end
+	actions = filtered_actions
+	stop_timer(update_suppress_start, "update_suppress")
+
 	local summary_start = start_timer()
 	local summary = build_summary(actions)
 	stop_timer(summary_start, "summary")
