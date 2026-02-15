@@ -129,12 +129,15 @@ function M.render(src_buf, dst_buf, actions, ns)
 						rendered_hunk = true
 					end
 				end
-
-				if rendered_hunk and src and src.start_row ~= nil then
-					apply_sign(src_buf, ns, src.start_row, "U", "DiffmanticChange", src_sign_rows)
-				end
-				if rendered_hunk and dst and dst.start_row ~= nil then
-					apply_sign(dst_buf, ns, dst.start_row, "U", "DiffmanticChange", dst_sign_rows)
+				if not rendered_hunk then
+					if src then
+						apply_span(src_buf, ns, src, style.hl)
+						apply_sign(src_buf, ns, src.start_row, style.sign, style.hl, src_sign_rows)
+					end
+					if dst then
+						apply_span(dst_buf, ns, dst, style.hl)
+						apply_sign(dst_buf, ns, dst.start_row, style.sign, style.hl, dst_sign_rows)
+					end
 				end
 			else
 				if src then
