@@ -34,4 +34,4 @@
   name: (type_identifier) @diff.identifier.rename)
 
 (init_declarator
-  declarator: [(identifier) (field_identifier)] @diff.identifier.rename)
+  declarator: (identifier) @diff.identifier.rename)

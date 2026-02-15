@@ -300,23 +300,34 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			end
 
 			local out = {}
-			local function walk(n)
+			local function first_identifier(n)
 				if n:child_count() == 0 then
 					local t = n:type()
-					if t == "identifier" or t == "type_identifier" or t == "field_identifier" or t == "property_identifier" then
+					if t == "identifier" or t == "field_identifier" or t == "property_identifier" then
 						local text = vim.treesitter.get_node_text(n, bufnr)
 						if text and text:match("^[%a_][%w_]*$") then
-							table.insert(out, { node = n, text = text })
+							return { node = n, text = text }
 						end
 					end
-					return
+					return nil
 				end
 				for child in n:iter_children() do
-					walk(child)
+					local found = first_identifier(child)
+					if found then
+						return found
+					end
 				end
+				return nil
 			end
 
-			walk(params_root)
+			for child in params_root:iter_children() do
+				if child:named() then
+					local found = first_identifier(child)
+					if found then
+						table.insert(out, found)
+					end
+				end
+			end
 			return out
 		end
 
@@ -360,71 +371,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			end
 		end
 
-		-- Pass 1b: strict fallback seed collection from mapped leaf identifiers.
-		if is_buf_available then
-			local src_to_dst_local = {}
-			for _, m in ipairs(mappings) do
-				src_to_dst_local[m.src] = m.dst
-			end
-
-			local function child_index(node)
-				local parent = node and node:parent() or nil
-				if not parent then
-					return -1
-				end
-				local idx = 0
-				for child in parent:iter_children() do
-					if child:equal(node) then
-						return idx
-					end
-					idx = idx + 1
-				end
-				return -1
-			end
-
-			local function is_identifier_node(node)
-				if not node then
-					return false
-				end
-				local t = node:type()
-				return t == "identifier" or t == "type_identifier" or t == "field_identifier" or t == "property_identifier"
-			end
-
-			local function is_identifier_like(text)
-				return text and text:match("^[%a_][%w_]*$") ~= nil
-			end
-
-			for _, m in ipairs(mappings) do
-				local s = src_info[m.src]
-				local d = dst_info[m.dst]
-				if s and d and s.node and d.node then
-					local src_node = s.node
-					local dst_node = d.node
-					if src_node:child_count() == 0 and dst_node:child_count() == 0 then
-						local src_parent = src_node:parent()
-						local dst_parent = dst_node:parent()
-						if src_parent and dst_parent and src_to_dst_local[src_parent:id()] == dst_parent:id() then
-							if src_parent:type() == dst_parent:type() and child_index(src_node) == child_index(dst_node) then
-								local src_text = vim.treesitter.get_node_text(src_node, src_buf)
-								local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
-								if src_text and dst_text and src_text ~= dst_text then
-									if
-										is_decl_rename(src_node, dst_node)
-										and is_identifier_node(src_node)
-										and is_identifier_node(dst_node)
-										and is_identifier_like(src_text)
-										and is_identifier_like(dst_text)
-									then
-										add_seed(src_text, dst_text)
-									end
-								end
-							end
-						end
-					end
-				end
-			end
-		end
-
 		-- Pass 2: emit leaf rename actions gated by seeds (and declaration renames).
 		for _, action in ipairs(actions_list) do
 			if action.type == "update" and action.analysis and action.analysis.leaf_changes then
@@ -442,79 +388,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 								dst_parent_type = action.dst_node and action.dst_node:type() or nil,
 								declaration = is_decl,
 							})
-						end
-					end
-				end
-			end
-		end
-
-		-- Pass 3: emit strict mapped-leaf rename actions for seed pairs not present in leaf_changes.
-		if is_buf_available then
-			local src_to_dst_local = {}
-			for _, m in ipairs(mappings) do
-				src_to_dst_local[m.src] = m.dst
-			end
-
-			local function child_index(node)
-				local parent = node and node:parent() or nil
-				if not parent then
-					return -1
-				end
-				local idx = 0
-				for child in parent:iter_children() do
-					if child:equal(node) then
-						return idx
-					end
-					idx = idx + 1
-				end
-				return -1
-			end
-
-			local function is_identifier_node(node)
-				if not node then
-					return false
-				end
-				local t = node:type()
-				return t == "identifier" or t == "type_identifier" or t == "field_identifier" or t == "property_identifier"
-			end
-
-			local function is_identifier_like(text)
-				return text and text:match("^[%a_][%w_]*$") ~= nil
-			end
-
-			for _, m in ipairs(mappings) do
-				local s = src_info[m.src]
-				local d = dst_info[m.dst]
-				if s and d and s.node and d.node then
-					local src_node = s.node
-					local dst_node = d.node
-					if src_node:child_count() == 0 and dst_node:child_count() == 0 then
-						local src_parent = src_node:parent()
-						local dst_parent = dst_node:parent()
-						if src_parent and dst_parent and src_to_dst_local[src_parent:id()] == dst_parent:id() then
-							if src_parent:type() == dst_parent:type() and child_index(src_node) == child_index(dst_node) then
-								local src_text = vim.treesitter.get_node_text(src_node, src_buf)
-								local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
-								if src_text and dst_text and src_text ~= dst_text then
-									if
-										is_decl_rename(src_node, dst_node)
-										and is_identifier_node(src_node)
-										and is_identifier_node(dst_node)
-										and is_identifier_like(src_text)
-										and is_identifier_like(dst_text)
-									then
-										local key = pair_key(src_text, dst_text)
-										if seed_pairs[key] then
-											push_rename(src_node, dst_node, src_text, dst_text, {
-												src_parent_type = src_parent:type(),
-												dst_parent_type = dst_parent:type(),
-												source = "mapping_seed",
-												declaration = true,
-											})
-										end
-									end
-								end
-							end
 						end
 					end
 				end

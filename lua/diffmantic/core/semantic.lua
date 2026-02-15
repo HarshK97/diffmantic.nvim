@@ -135,9 +135,14 @@ function M.is_rename_identifier(node, role_index)
 			return true
 		end
 		if ptype == "field_declaration" and M.node_in_field(parent, "declarator", current) then
-			return true
+			-- C/C++ member fields often have no value context; rename inference here is noisy.
+			return false
 		end
 		if ptype == "declarator" then
+			local grandparent = parent:parent()
+			if grandparent and grandparent:type() == "field_declaration" then
+				return false
+			end
 			return true
 		end
 		if ptype == "field" then
