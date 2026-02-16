@@ -147,15 +147,32 @@ local function coalesce_simple(fillers)
 	return merged
 end
 
-local function count_filler_lines_before(fillers, row)
+local function count_filler_lines_before(fillers, row, exclude)
 	if row == nil or not fillers then
 		return 0
 	end
 	local total = 0
 	for _, filler in ipairs(fillers) do
-		if filler.row and filler.row < row then
+		if filler ~= exclude and filler.row and filler.row < row then
 			if filler.lines then
-				total = total + (filler.base_count or #filler.lines)
+				total = total + #filler.lines
+			elseif filler.count then
+				total = total + filler.count
+			end
+		end
+	end
+	return total
+end
+
+local function count_filler_lines_at(fillers, row, exclude)
+	if row == nil or not fillers then
+		return 0
+	end
+	local total = 0
+	for _, filler in ipairs(fillers) do
+		if filler ~= exclude and filler.row and filler.row == row then
+			if filler.lines then
+				total = total + #filler.lines
 			elseif filler.count then
 				total = total + filler.count
 			end
@@ -224,29 +241,6 @@ local function range_from_run(run)
 	}
 end
 
-local function move_anchor_after_blank_run(buf, row)
-	if not buf or row == nil or row < 0 then
-		return row
-	end
-	local max_row = vim.api.nvim_buf_line_count(buf) - 1
-	local cursor = math.min(row, max_row)
-
-	while cursor <= max_row do
-		local lines = vim.api.nvim_buf_get_lines(buf, cursor, cursor + 1, false)
-		local line = lines[1] or ""
-		if line:match("^%s*$") then
-			cursor = cursor + 1
-		else
-			break
-		end
-	end
-
-	if cursor > max_row then
-		return row
-	end
-	return cursor
-end
-
 function M.compute(actions, src_buf, dst_buf)
 	local src_fillers = {}
 	local dst_fillers = {}
@@ -262,14 +256,12 @@ function M.compute(actions, src_buf, dst_buf)
 			local src_entry = {
 				row = action.dst.start_row,
 				lines = {},
-				base_count = dst_base_count,
 			}
 			ensure_lines(src_entry, dst_count, "DiffmanticMoveFiller")
 
 			local dst_entry = {
 				row = action.src.start_row,
 				lines = {},
-				base_count = src_base_count,
 			}
 			ensure_lines(dst_entry, src_count, "DiffmanticMoveFiller")
 
@@ -363,9 +355,12 @@ function M.compute(actions, src_buf, dst_buf)
 	end
 
 	for _, region in ipairs(move_regions) do
-		region.src_entry.row = region.src_entry.row + count_filler_lines_before(dst_fillers, region.src_entry.row)
-		region.dst_entry.row = region.dst_entry.row + count_filler_lines_before(src_fillers, region.dst_entry.row)
-		region.dst_entry.row = move_anchor_after_blank_run(dst_buf, region.dst_entry.row)
+		region.src_entry.row = region.src_entry.row
+			+ count_filler_lines_before(dst_fillers, region.src_entry.row, region.src_entry)
+			+ count_filler_lines_at(dst_fillers, region.src_entry.row, region.src_entry)
+		region.dst_entry.row = region.dst_entry.row
+			+ count_filler_lines_before(src_fillers, region.dst_entry.row, region.dst_entry)
+			+ count_filler_lines_at(src_fillers, region.dst_entry.row, region.dst_entry)
 	end
 
 	return coalesce_simple(src_fillers), coalesce_simple(dst_fillers)

@@ -3,6 +3,73 @@ local semantic = require("diffmantic.core.semantic")
 local roles = require("diffmantic.core.roles")
 local analysis = require("diffmantic.core.analysis")
 
+local function range_text(buf, range)
+	if not buf or not range then
+		return nil
+	end
+	if range.start_row == nil or range.end_row == nil or range.start_col == nil or range.end_col == nil then
+		return nil
+	end
+	if range.start_row ~= range.end_row then
+		return nil
+	end
+	local line = vim.api.nvim_buf_get_lines(buf, range.start_row, range.start_row + 1, false)[1] or ""
+	if line == "" then
+		return nil
+	end
+	local start_col = range.start_col + 1
+	local end_col = range.end_col
+	if end_col < start_col then
+		return nil
+	end
+	return line:sub(start_col, end_col)
+end
+
+local function action_pair_key(action)
+	if action and action.src_node and action.dst_node then
+		return action.src_node:id() .. ":" .. action.dst_node:id()
+	end
+	if action and action.src and action.dst then
+		return table.concat({
+			tostring(action.src.start_row),
+			tostring(action.src.start_col),
+			tostring(action.src.end_row),
+			tostring(action.src.end_col),
+			tostring(action.dst.start_row),
+			tostring(action.dst.start_col),
+			tostring(action.dst.end_row),
+			tostring(action.dst.end_col),
+		}, ":")
+	end
+	return nil
+end
+
+local function has_effective_update_hunks(action, src_buf, dst_buf)
+	local action_analysis = action and action.analysis or nil
+	local hunks = action_analysis and action_analysis.hunks or nil
+	if not hunks or #hunks == 0 then
+		return false
+	end
+
+	local rename_pairs = action_analysis.rename_pairs or {}
+	for _, hunk in ipairs(hunks) do
+		if hunk.kind == "insert" or hunk.kind == "delete" then
+			return true
+		end
+		if hunk.kind == "change" then
+			local src_text = range_text(src_buf, hunk.src)
+			local dst_text = range_text(dst_buf, hunk.dst)
+			if not src_text or not dst_text then
+				return true
+			end
+			if src_text ~= dst_text and rename_pairs[src_text] ~= dst_text then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function range_metadata(node)
 	if not node then
 		return nil
@@ -792,28 +859,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 	stop_timer(moves_start, "moves")
 
-	-- Updates for nodes that are also classified as moves are noisy and duplicate intent.
-	local moved_pairs = {}
-	for _, action in ipairs(actions) do
-		if action.type == "move" and action.src_node and action.dst_node then
-			moved_pairs[action.src_node:id() .. ":" .. action.dst_node:id()] = true
-		end
-	end
-	if next(moved_pairs) ~= nil then
-		local filtered = {}
-		for _, action in ipairs(actions) do
-			if action.type == "update" and action.src_node and action.dst_node then
-				local key = action.src_node:id() .. ":" .. action.dst_node:id()
-				if moved_pairs[key] then
-					goto continue
-				end
-			end
-			table.insert(filtered, action)
-			::continue::
-		end
-		actions = filtered
-	end
-
 	-- DELETES: unmapped source nodes
 	local deletes_start = start_timer()
 	for id, info in pairs(src_info) do
@@ -854,13 +899,35 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	stop_timer(analysis_start, "analysis")
 
 	local update_suppress_start = start_timer()
+	local moved_pairs = {}
+	local declaration_rename_pairs = {}
+	for _, action in ipairs(actions) do
+		local key = action_pair_key(action)
+		if key then
+			if action.type == "move" then
+				moved_pairs[key] = true
+			elseif action.type == "rename" and action.context and action.context.declaration then
+				declaration_rename_pairs[key] = true
+			end
+		end
+	end
+
 	local filtered_actions = {}
 	for _, action in ipairs(actions) do
 		if action.type == "update" then
+			local key = action_pair_key(action)
 			local action_analysis = action.analysis or {}
-			local has_hunks = action_analysis.hunks and #action_analysis.hunks > 0
+			local has_hunks = has_effective_update_hunks(action, src_buf, dst_buf)
 			local has_rename_pairs = action_analysis.rename_pairs and next(action_analysis.rename_pairs) ~= nil
+			local overlaps_decl_rename = key and declaration_rename_pairs[key] or false
+			local overlaps_move = key and moved_pairs[key] or false
 			if action_analysis.rename_only and has_rename_pairs and not has_hunks then
+				goto continue
+			end
+			if overlaps_decl_rename and not has_hunks then
+				goto continue
+			end
+			if overlaps_move and not has_hunks then
 				goto continue
 			end
 		end
