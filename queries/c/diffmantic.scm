@@ -1,7 +1,13 @@
 (function_definition
-  declarator: (function_declarator
-    declarator: (identifier) @diff.function.name)
+  declarator: (function_declarator)
   body: (compound_statement) @diff.function.body) @diff.function.outer
+
+(function_declarator
+  declarator: (identifier) @diff.function.name)
+
+(function_declarator
+  declarator: (pointer_declarator
+    declarator: (identifier) @diff.function.name))
 
 (struct_specifier
   name: (type_identifier) @diff.class.name
@@ -16,7 +22,19 @@
   body: (enumerator_list) @diff.class.body) @diff.class.outer
 
 (init_declarator
-  declarator: [(identifier) (field_identifier)] @diff.variable.name) @diff.variable.outer
+  declarator: [
+    (identifier) @diff.variable.name
+    (pointer_declarator
+      declarator: (identifier) @diff.variable.name)
+    (array_declarator
+      declarator: (identifier) @diff.variable.name)
+    (pointer_declarator
+      declarator: (array_declarator
+        declarator: (identifier) @diff.variable.name))
+    (array_declarator
+      declarator: (pointer_declarator
+        declarator: (identifier) @diff.variable.name))
+  ]) @diff.variable.outer
 
 (assignment_expression
   left: (_) @diff.assignment.lhs
@@ -27,8 +45,11 @@
 (preproc_def) @diff.preproc.outer
 (preproc_function_def) @diff.preproc.outer
 
-(function_definition
-  declarator: (function_declarator
+(function_declarator
+  declarator: (identifier) @diff.identifier.rename)
+
+(function_declarator
+  declarator: (pointer_declarator
     declarator: (identifier) @diff.identifier.rename))
 
 (struct_specifier

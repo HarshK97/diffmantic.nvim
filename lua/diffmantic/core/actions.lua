@@ -259,6 +259,30 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 
 		local function is_decl_rename(src_node, dst_node)
+			local function is_class_name_node(node, role_index)
+				return roles.has_capture(node, role_index, "diff.class.name")
+			end
+
+			local function is_class_like_context(node, role_index)
+				local cur = node
+				while cur do
+					if roles.has_kind(cur, role_index, "class") then
+						return true
+					end
+					cur = cur:parent()
+				end
+				return false
+			end
+
+			local src_is_class_name = is_class_name_node(src_node, src_role_index)
+			local dst_is_class_name = is_class_name_node(dst_node, dst_role_index)
+			if
+				(not src_is_class_name and is_class_like_context(src_node, src_role_index))
+				or (not dst_is_class_name and is_class_like_context(dst_node, dst_role_index))
+			then
+				return false
+			end
+
 			return semantic.is_rename_identifier(src_node, src_role_index)
 				and semantic.is_rename_identifier(dst_node, dst_role_index)
 		end
@@ -574,6 +598,17 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		return movable_types[info.type] or false
 	end
 
+	local function should_emit_update(info, index)
+		if not is_significant(info, index) then
+			return false
+		end
+		-- Type/struct/class bodies are better represented by insert/delete or move+rename.
+		if has_kind(info.node, index, "class") then
+			return false
+		end
+		return true
+	end
+
 	-- Helper: check if node or any descendant has different content
 	local function has_content_change(src_node, dst_node)
 		local src_info_data = src_info[src_node:id()]
@@ -661,7 +696,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	for _, m in ipairs(mappings) do
 		local s, d = src_info[m.src], dst_info[m.dst]
 
-		if nodes_with_changes[m.src] and is_significant(s, src_role_index) then
+		if nodes_with_changes[m.src] and should_emit_update(s, src_role_index) then
 			if not src_has_updated_sig_ancestor[m.src] then
 				table.insert(actions, build_action("update", s.node, d.node))
 			end
@@ -756,6 +791,28 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 	end
 	stop_timer(moves_start, "moves")
+
+	-- Updates for nodes that are also classified as moves are noisy and duplicate intent.
+	local moved_pairs = {}
+	for _, action in ipairs(actions) do
+		if action.type == "move" and action.src_node and action.dst_node then
+			moved_pairs[action.src_node:id() .. ":" .. action.dst_node:id()] = true
+		end
+	end
+	if next(moved_pairs) ~= nil then
+		local filtered = {}
+		for _, action in ipairs(actions) do
+			if action.type == "update" and action.src_node and action.dst_node then
+				local key = action.src_node:id() .. ":" .. action.dst_node:id()
+				if moved_pairs[key] then
+					goto continue
+				end
+			end
+			table.insert(filtered, action)
+			::continue::
+		end
+		actions = filtered
+	end
 
 	-- DELETES: unmapped source nodes
 	local deletes_start = start_timer()

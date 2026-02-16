@@ -40,6 +40,26 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 
 	-- Get the name of a declaration node (function or variable)
 	local function get_declaration_name(node, bufnr, role_index)
+		local function find_first_identifier(n)
+			if not n then
+				return nil
+			end
+			if n:child_count() == 0 then
+				local t = n:type()
+				if t == "identifier" or t == "field_identifier" or t == "property_identifier" then
+					return n
+				end
+				return nil
+			end
+			for child in n:iter_children() do
+				local found = find_first_identifier(child)
+				if found then
+					return found
+				end
+			end
+			return nil
+		end
+
 		local function_name = roles.get_kind_name_text(node, role_index, bufnr, "function")
 		if function_name and #function_name > 0 then
 			return function_name
@@ -133,10 +153,9 @@ function M.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src
 		if node:type() == "function_definition" then
 			for child in node:iter_children() do
 				if child:type() == "function_declarator" then
-					for subchild in child:iter_children() do
-						if subchild:type() == "identifier" then
-							return vim.treesitter.get_node_text(subchild, bufnr)
-						end
+					local found = find_first_identifier(child)
+					if found then
+						return vim.treesitter.get_node_text(found, bufnr)
 					end
 				end
 			end

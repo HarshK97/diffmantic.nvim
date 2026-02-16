@@ -1,7 +1,13 @@
 (function_definition
-  declarator: (function_declarator
-    declarator: (identifier) @diff.function.name)
+  declarator: (function_declarator)
   body: (compound_statement) @diff.function.body) @diff.function.outer
+
+(function_declarator
+  declarator: (identifier) @diff.function.name)
+
+(function_declarator
+  declarator: (pointer_declarator
+    declarator: (identifier) @diff.function.name))
 
 (class_specifier
   name: (type_identifier) @diff.class.name
@@ -23,8 +29,11 @@
 (preproc_def) @diff.preproc.outer
 (preproc_function_def) @diff.preproc.outer
 
-(function_definition
-  declarator: (function_declarator
+(function_declarator
+  declarator: (identifier) @diff.identifier.rename)
+
+(function_declarator
+  declarator: (pointer_declarator
     declarator: (identifier) @diff.identifier.rename))
 
 (class_specifier

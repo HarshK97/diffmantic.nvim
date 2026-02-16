@@ -15,6 +15,10 @@
   (var_spec
     name: (identifier) @diff.variable.name)) @diff.variable.outer
 
+(const_declaration
+  (const_spec
+    name: (identifier) @diff.variable.name)) @diff.variable.outer
+
 (short_var_declaration
   left: (expression_list (identifier) @diff.variable.name)) @diff.variable.outer
 
@@ -37,6 +41,10 @@
 
 (var_declaration
   (var_spec
+    name: (identifier) @diff.identifier.rename))
+
+(const_declaration
+  (const_spec
     name: (identifier) @diff.identifier.rename))
 
 (short_var_declaration

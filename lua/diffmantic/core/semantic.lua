@@ -84,7 +84,29 @@ function M.is_rename_identifier(node, role_index)
 		return false
 	end
 
+	local function in_class_like_context(n, index)
+		if not index then
+			return false
+		end
+		local cur = n
+		while cur do
+			if roles.has_kind(cur, index, "class") then
+				return true
+			end
+			cur = cur:parent()
+		end
+		return false
+	end
+
+	local function is_class_name_node(n, index)
+		return index and roles.has_capture(n, index, "diff.class.name") or false
+	end
+
 	if role_index and roles.has_kind(node, role_index, "rename_identifier") then
+		-- Allow renaming struct/type/class declaration names, but not members inside them.
+		if in_class_like_context(node, role_index) and not is_class_name_node(node, role_index) then
+			return false
+		end
 		return true
 	end
 
@@ -100,6 +122,9 @@ function M.is_rename_identifier(node, role_index)
 
 	local parent_type = parent:type()
 	if parent_type == "parameters" or parent_type == "parameter_list" or parent_type == "formal_parameters" then
+		return true
+	end
+	if parent_type == "parameter_declaration" and node_type == "identifier" then
 		return true
 	end
 

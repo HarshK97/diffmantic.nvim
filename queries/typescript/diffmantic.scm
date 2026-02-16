@@ -10,8 +10,19 @@
   name: (type_identifier) @diff.class.name
   body: (class_body) @diff.class.body) @diff.class.outer
 
+(type_alias_declaration
+  name: (type_identifier) @diff.class.name
+  value: (object_type) @diff.class.body) @diff.class.outer
+
+(interface_declaration
+  name: (type_identifier) @diff.class.name
+  body: (interface_body) @diff.class.body) @diff.class.outer
+
 (variable_declarator
   name: [(identifier) (object_pattern) (array_pattern)] @diff.variable.name) @diff.variable.outer
+
+(property_signature
+  name: (property_identifier) @diff.variable.name) @diff.variable.outer
 
 (assignment_expression
   left: (_) @diff.assignment.lhs
@@ -29,5 +40,14 @@
 (class_declaration
   name: (type_identifier) @diff.identifier.rename)
 
+(type_alias_declaration
+  name: (type_identifier) @diff.identifier.rename)
+
+(interface_declaration
+  name: (type_identifier) @diff.identifier.rename)
+
 (variable_declarator
   name: (identifier) @diff.identifier.rename)
+
+(property_signature
+  name: (property_identifier) @diff.identifier.rename)
