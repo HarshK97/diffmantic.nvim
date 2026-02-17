@@ -1,5 +1,4 @@
 local signs = require("diffmantic.ui.signs")
-local filler = require("diffmantic.ui.filler")
 
 local M = {}
 
@@ -90,6 +89,62 @@ local HUNK_STYLE = {
 	},
 }
 
+local function range_text(buf, range)
+	if not buf or not range then
+		return nil
+	end
+	if range.start_row == nil or range.end_row == nil or range.start_col == nil or range.end_col == nil then
+		return nil
+	end
+	if range.start_row ~= range.end_row then
+		return nil
+	end
+	local line = vim.api.nvim_buf_get_lines(buf, range.start_row, range.start_row + 1, false)[1] or ""
+	if line == "" then
+		return nil
+	end
+	local start_col = range.start_col + 1
+	local end_col = range.end_col
+	if end_col < start_col then
+		return nil
+	end
+	return line:sub(start_col, end_col)
+end
+
+local function hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf)
+	if not hunk then
+		return false
+	end
+	if hunk.kind == "insert" or hunk.kind == "delete" then
+		return true
+	end
+	if hunk.kind ~= "change" then
+		return false
+	end
+	local src_text = range_text(src_buf, hunk.src)
+	local dst_text = range_text(dst_buf, hunk.dst)
+	if not src_text or not dst_text then
+		return true
+	end
+	return src_text ~= dst_text and rename_pairs[src_text] ~= dst_text
+end
+
+local function effective_update_hunks(action, src_buf, dst_buf)
+	local analysis = action and action.analysis or nil
+	local hunks = analysis and analysis.hunks or nil
+	if not hunks or #hunks == 0 then
+		return {}
+	end
+	local rename_pairs = analysis.rename_pairs or {}
+	local effective = {}
+	for _, hunk in ipairs(hunks) do
+		if hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf) then
+			table.insert(effective, hunk)
+		end
+	end
+	return effective
+end
+
 local function move_to_arrow(from_line, to_line)
 	if type(from_line) ~= "number" or type(to_line) ~= "number" then
 		return "⤴"
@@ -103,9 +158,7 @@ end
 function M.render(src_buf, dst_buf, actions, ns)
 	local src_sign_rows = {}
 	local dst_sign_rows = {}
-	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf)
-	filler.apply(src_buf, ns, src_fillers)
-	filler.apply(dst_buf, ns, dst_fillers)
+
 
 	for _, action in ipairs(actions) do
 		local style = TYPE_STYLE[action.type]
@@ -114,9 +167,13 @@ function M.render(src_buf, dst_buf, actions, ns)
 			local dst = action.dst
 			local meta = action.metadata or {}
 
-			if action.type == "update" and action.analysis and action.analysis.hunks then
+			if action.type == "update" then
+				local effective_hunks = effective_update_hunks(action, src_buf, dst_buf)
+				if #effective_hunks == 0 then
+					goto continue
+				end
 				local rendered_hunk = false
-				for _, hunk in ipairs(action.analysis.hunks) do
+				for _, hunk in ipairs(effective_hunks) do
 					local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
 					if hunk.src and hstyle.src_hl then
 						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
@@ -130,14 +187,7 @@ function M.render(src_buf, dst_buf, actions, ns)
 					end
 				end
 				if not rendered_hunk then
-					if src then
-						apply_span(src_buf, ns, src, style.hl)
-						apply_sign(src_buf, ns, src.start_row, style.sign, style.hl, src_sign_rows)
-					end
-					if dst then
-						apply_span(dst_buf, ns, dst, style.hl)
-						apply_sign(dst_buf, ns, dst.start_row, style.sign, style.hl, dst_sign_rows)
-					end
+					goto continue
 				end
 			else
 				if src then
@@ -166,6 +216,7 @@ function M.render(src_buf, dst_buf, actions, ns)
 					end
 				end
 			end
+			::continue::
 		end
 	end
 end
