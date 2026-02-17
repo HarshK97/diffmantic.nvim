@@ -34,6 +34,7 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 
 	local src_mapped = {}
 	local dst_mapped = {}
+	local src_to_dst = {}
 
 	-- Group nodes by their height in the tree
 	local function get_nodes_by_height(info)
@@ -53,6 +54,26 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 	end
 	local src_by_height = get_nodes_by_height(src_info)
 	local dst_by_height = get_nodes_by_height(dst_info)
+
+	local function parents_are_compatible(src_data, dst_data)
+		local src_parent = src_data.parent
+		local dst_parent = dst_data.parent
+
+		if not src_parent and not dst_parent then
+			return true
+		end
+		if not src_parent or not dst_parent then
+			return false
+		end
+
+		local src_parent_id = src_parent:id()
+		local dst_parent_id = dst_parent:id()
+		if src_parent_id == src_root:id() and dst_parent_id == dst_root:id() then
+			return true
+		end
+
+		return src_to_dst[src_parent_id] == dst_parent_id
+	end
 
 	-- Find the maximum height in both trees
 	local max_h = 0
@@ -85,17 +106,18 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 		for _, s in ipairs(s_nodes) do
 			if not src_mapped[s.id] then
 				local candidates = dst_by_hash[s.hash]
-				if candidates then
-					for i, d in ipairs(candidates) do
-						if not dst_mapped[d.id] then
-							table.insert(mappings, { src = s.id, dst = d.id })
-							src_mapped[s.id] = true
-							dst_mapped[d.id] = true
-							table.remove(candidates, i)
-							break
+					if candidates then
+						for i, d in ipairs(candidates) do
+							if not dst_mapped[d.id] and parents_are_compatible(s, d) then
+								table.insert(mappings, { src = s.id, dst = d.id })
+								src_mapped[s.id] = true
+								dst_mapped[d.id] = true
+								src_to_dst[s.id] = d.id
+								table.remove(candidates, i)
+								break
+							end
 						end
 					end
-				end
 			end
 		end
 	end

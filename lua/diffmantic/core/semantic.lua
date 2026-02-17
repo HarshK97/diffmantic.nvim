@@ -1,8 +1,66 @@
 local M = {}
 local roles = require("diffmantic.core.roles")
 
+local function in_class_like_context(node, role_index)
+	if not node then
+		return false
+	end
+	local cur = node
+	while cur do
+		local ctype = cur:type()
+		if ctype == "class_specifier" or ctype == "struct_specifier" or ctype == "union_specifier" or ctype == "class_definition" then
+			return true
+		end
+		if role_index and roles.has_kind(cur, role_index, "class") then
+			return true
+		end
+		cur = cur:parent()
+	end
+	return false
+end
+
+function M.is_ambiguous_member_change(node, role_index)
+	if not node then
+		return false
+	end
+	local node_type = node:type()
+	if node_type ~= "identifier" and node_type ~= "field_identifier" and node_type ~= "type_identifier" then
+		return false
+	end
+
+	local cur = node
+	local parent = node:parent()
+	while parent do
+		local ptype = parent:type()
+		if ptype == "field_declaration" or ptype == "field_declarator" then
+			return true
+		end
+		if ptype == "declarator" then
+			local grandparent = parent:parent()
+			if grandparent and (grandparent:type() == "field_declaration" or grandparent:type() == "field_declarator") then
+				return true
+			end
+		end
+		if (ptype == "class_specifier" or ptype == "struct_specifier" or ptype == "union_specifier" or ptype == "enum_specifier")
+			and not M.node_in_field(parent, "name", cur)
+			and not M.node_in_field(parent, "tag", cur)
+			and node_type == "field_identifier"
+		then
+			return true
+		end
+		cur = parent
+		parent = parent:parent()
+	end
+
+	if role_index and in_class_like_context(node, role_index) and node_type == "field_identifier" then
+		return true
+	end
+
+	return false
+end
+
 -- Leaf-level diffs for small updates; otherwise return empty.
-function M.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
+function M.find_leaf_changes(src_node, dst_node, src_buf, dst_buf, src_role_index, dst_role_index)
 	local changes = {}
 
 	local function get_all_leaves(node, bufnr)
@@ -44,12 +102,19 @@ function M.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
 		if sl.type == dl.type and sl.text == dl.text then
 			same_count = same_count + 1
 		elseif sl.type == dl.type and sl.text ~= dl.text then
-			table.insert(changes, {
-				src_node = sl.node,
-				dst_node = dl.node,
-				src_text = sl.text,
-				dst_text = dl.text,
-			})
+			local src_ambiguous = M.is_ambiguous_member_change(sl.node, src_role_index)
+			local dst_ambiguous = M.is_ambiguous_member_change(dl.node, dst_role_index)
+			if src_ambiguous or dst_ambiguous then
+				-- Member declaration internals are structurally noisy; avoid rename/update inference.
+				same_count = same_count + 1
+			else
+				table.insert(changes, {
+					src_node = sl.node,
+					dst_node = dl.node,
+					src_text = sl.text,
+					dst_text = dl.text,
+				})
+			end
 		end
 	end
 
@@ -84,22 +149,12 @@ function M.is_rename_identifier(node, role_index)
 		return false
 	end
 
-	local function in_class_like_context(n, index)
-		if not index then
-			return false
-		end
-		local cur = n
-		while cur do
-			if roles.has_kind(cur, index, "class") then
-				return true
-			end
-			cur = cur:parent()
-		end
-		return false
-	end
-
 	local function is_class_name_node(n, index)
 		return index and roles.has_capture(n, index, "diff.class.name") or false
+	end
+
+	if M.is_ambiguous_member_change(node, role_index) then
+		return false
 	end
 
 	if role_index and roles.has_kind(node, role_index, "rename_identifier") then
@@ -121,7 +176,15 @@ function M.is_rename_identifier(node, role_index)
 	end
 
 	local parent_type = parent:type()
-	if parent_type == "parameters" or parent_type == "parameter_list" or parent_type == "formal_parameters" then
+	local parameter_parent_kinds = {
+		parameters = true,
+		parameter_list = true,
+		formal_parameters = true,
+		required_parameter = true,
+		optional_parameter = true,
+		rest_parameter = true,
+	}
+	if parameter_parent_kinds[parent_type] then
 		return true
 	end
 	if parent_type == "parameter_declaration" and node_type == "identifier" then
