@@ -2,6 +2,11 @@
   declarator: (function_declarator)
   body: (compound_statement) @diff.function.body) @diff.function.outer
 
+(function_definition
+  declarator: (pointer_declarator
+    declarator: (function_declarator))
+  body: (compound_statement) @diff.function.body) @diff.function.outer
+
 (function_declarator
   declarator: (identifier) @diff.function.name)
 
@@ -18,7 +23,40 @@
   body: (field_declaration_list) @diff.class.body) @diff.class.outer
 
 (init_declarator
-  declarator: [(identifier) (field_identifier)] @diff.variable.name) @diff.variable.outer
+  declarator: [
+    (identifier) @diff.variable.name
+    (field_identifier) @diff.variable.name
+  ]) @diff.variable.outer
+
+(field_declaration
+  declarator: [
+    (field_identifier) @diff.variable.name
+    (pointer_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (array_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (pointer_declarator
+      declarator: (array_declarator
+        declarator: (field_identifier) @diff.variable.name))
+    (array_declarator
+      declarator: (pointer_declarator
+        declarator: (field_identifier) @diff.variable.name))
+  ]) @diff.variable.outer
+
+(field_declaration
+  [
+    (field_identifier) @diff.variable.name
+    (pointer_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (array_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (pointer_declarator
+      declarator: (array_declarator
+        declarator: (field_identifier) @diff.variable.name))
+    (array_declarator
+      declarator: (pointer_declarator
+        declarator: (field_identifier) @diff.variable.name))
+  ]) @diff.variable.outer
 
 (assignment_expression
   left: (_) @diff.assignment.lhs
@@ -43,4 +81,6 @@
   name: (type_identifier) @diff.identifier.rename)
 
 (init_declarator
-  declarator: (identifier) @diff.identifier.rename)
+  declarator: [
+    (identifier) @diff.identifier.rename
+  ])

@@ -13,9 +13,17 @@
 (variable_declarator
   name: [(identifier) (object_pattern) (array_pattern)] @diff.variable.name) @diff.variable.outer
 
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @diff.variable.name)) @diff.variable.outer
+
 (assignment_expression
   left: (_) @diff.assignment.lhs
   right: (_) @diff.assignment.rhs) @diff.assignment.outer
+
+(pair
+  key: (_) @diff.assignment.lhs
+  value: (_) @diff.assignment.rhs) @diff.assignment.outer
 
 (import_statement) @diff.import.outer
 (return_statement) @diff.return.outer

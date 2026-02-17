@@ -2,6 +2,11 @@
   declarator: (function_declarator)
   body: (compound_statement) @diff.function.body) @diff.function.outer
 
+(function_definition
+  declarator: (pointer_declarator
+    declarator: (function_declarator))
+  body: (compound_statement) @diff.function.body) @diff.function.outer
+
 (function_declarator
   declarator: (identifier) @diff.function.name)
 
@@ -24,6 +29,8 @@
 (init_declarator
   declarator: [
     (identifier) @diff.variable.name
+    (parenthesized_declarator
+      (identifier) @diff.variable.name)
     (pointer_declarator
       declarator: (identifier) @diff.variable.name)
     (array_declarator
@@ -34,6 +41,36 @@
     (array_declarator
       declarator: (pointer_declarator
         declarator: (identifier) @diff.variable.name))
+  ]) @diff.variable.outer
+
+(field_declaration
+  declarator: [
+    (field_identifier) @diff.variable.name
+    (pointer_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (array_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (pointer_declarator
+      declarator: (array_declarator
+        declarator: (field_identifier) @diff.variable.name))
+    (array_declarator
+      declarator: (pointer_declarator
+        declarator: (field_identifier) @diff.variable.name))
+  ]) @diff.variable.outer
+
+(field_declaration
+  [
+    (field_identifier) @diff.variable.name
+    (pointer_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (array_declarator
+      declarator: (field_identifier) @diff.variable.name)
+    (pointer_declarator
+      declarator: (array_declarator
+        declarator: (field_identifier) @diff.variable.name))
+    (array_declarator
+      declarator: (pointer_declarator
+        declarator: (field_identifier) @diff.variable.name))
   ]) @diff.variable.outer
 
 (assignment_expression
@@ -62,4 +99,18 @@
   name: (type_identifier) @diff.identifier.rename)
 
 (init_declarator
-  declarator: (identifier) @diff.identifier.rename)
+  declarator: [
+    (identifier) @diff.identifier.rename
+    (parenthesized_declarator
+      (identifier) @diff.identifier.rename)
+    (pointer_declarator
+      declarator: (identifier) @diff.identifier.rename)
+    (array_declarator
+      declarator: (identifier) @diff.identifier.rename)
+    (pointer_declarator
+      declarator: (array_declarator
+        declarator: (identifier) @diff.identifier.rename))
+    (array_declarator
+      declarator: (pointer_declarator
+        declarator: (identifier) @diff.identifier.rename))
+  ])

@@ -9,7 +9,10 @@
 (type_declaration
   (type_spec
     name: (type_identifier) @diff.class.name
-    type: (struct_type) @diff.class.body)) @diff.class.outer
+    type: [
+      (struct_type) @diff.class.body
+      (interface_type) @diff.class.body
+    ])) @diff.class.outer
 
 (var_declaration
   (var_spec
@@ -22,9 +25,19 @@
 (short_var_declaration
   left: (expression_list (identifier) @diff.variable.name)) @diff.variable.outer
 
+(field_declaration
+  name: (field_identifier) @diff.variable.name) @diff.variable.outer
+
+(field_declaration
+  (field_identifier) @diff.variable.name) @diff.variable.outer
+
 (assignment_statement
   left: (_) @diff.assignment.lhs
   right: (_) @diff.assignment.rhs) @diff.assignment.outer
+
+(keyed_element
+  key: (_) @diff.assignment.lhs
+  value: (_) @diff.assignment.rhs) @diff.assignment.outer
 
 (import_declaration) @diff.import.outer
 (return_statement) @diff.return.outer
