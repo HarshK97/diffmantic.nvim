@@ -47,28 +47,26 @@ local function tokenize_line(text)
 	local tokens = {}
 	local i = 1
 	local len = #text
-	while i <= len do
-		local ch = text:sub(i, i)
-		if ch:match("%s") then
-			i = i + 1
-		elseif ch:match("[%w_]") then
-			local j = i + 1
-			while j <= len and text:sub(j, j):match("[%w_]") do
-				j = j + 1
+		while i <= len do
+			local ch = text:sub(i, i)
+			if ch:match("%s") then
+				i = i + 1
+			elseif ch:match("[%w_]") then
+				local j = i + 1
+				while j <= len and text:sub(j, j):match("[%w_]") do
+					j = j + 1
+				end
+				table.insert(tokens, { text = text:sub(i, j - 1), start_col = i, end_col = j - 1 })
+				i = j
+			else
+				-- Keep punctuation/granular symbols as single-char tokens so we can
+				-- align shared delimiters (e.g. closing quote) and avoid off-by-one spans.
+				table.insert(tokens, { text = ch, start_col = i, end_col = i })
+				i = i + 1
 			end
-			table.insert(tokens, { text = text:sub(i, j - 1), start_col = i, end_col = j - 1 })
-			i = j
-		else
-			local j = i + 1
-			while j <= len and not text:sub(j, j):match("[%w_%s]") do
-				j = j + 1
-			end
-			table.insert(tokens, { text = text:sub(i, j - 1), start_col = i, end_col = j - 1 })
-			i = j
 		end
+		return tokens
 	end
-	return tokens
-end
 
 local function tokens_equal(a, b, rename_map)
 	if a.text == b.text then
@@ -88,43 +86,45 @@ local function lcs_matches(a, b, rename_map)
 	end
 
 	local dp = {}
-	for i = 0, n do
+	for i = 1, n + 1 do
 		dp[i] = {}
-		dp[i][0] = 0
-	end
-	for j = 1, m do
-		dp[0][j] = 0
+		for j = 1, m + 1 do
+			dp[i][j] = 0
+		end
 	end
 
-	for i = 1, n do
-		for j = 1, m do
+	for i = n, 1, -1 do
+		for j = m, 1, -1 do
 			if tokens_equal(a[i], b[j], rename_map) then
-				dp[i][j] = dp[i - 1][j - 1] + 1
+				dp[i][j] = dp[i + 1][j + 1] + 1
 			else
-				local up = dp[i - 1][j]
-				local left = dp[i][j - 1]
-				dp[i][j] = (up >= left) and up or left
+				local skip_src = dp[i + 1][j]
+				local skip_dst = dp[i][j + 1]
+				dp[i][j] = (skip_src >= skip_dst) and skip_src or skip_dst
 			end
 		end
 	end
 
 	local match_a = {}
 	local match_b = {}
-	local i = n
-	local j = m
-	while i > 0 and j > 0 do
-		if tokens_equal(a[i], b[j], rename_map) then
+	local i = 1
+	local j = 1
+	while i <= n and j <= m do
+		if tokens_equal(a[i], b[j], rename_map) and dp[i][j] == (dp[i + 1][j + 1] + 1) then
 			match_a[i] = true
 			match_b[j] = true
-			i = i - 1
-			j = j - 1
+			i = i + 1
+			j = j + 1
 		else
-			local up = dp[i - 1][j]
-			local left = dp[i][j - 1]
-			if up >= left then
-				i = i - 1
+			local skip_src = dp[i + 1][j]
+			local skip_dst = dp[i][j + 1]
+			if skip_dst > skip_src then
+				j = j + 1
+			elseif skip_src > skip_dst then
+				i = i + 1
 			else
-				j = j - 1
+				-- Tie: keep destination earlier by advancing source.
+				i = i + 1
 			end
 		end
 	end
@@ -294,6 +294,112 @@ local function is_suppressed_change_hunk(hunk_src, hunk_dst, suppressed_pairs, d
 	return false
 end
 
+local function whitespace_between(buf, row, left_end_col, right_start_col)
+	if not buf or row == nil or left_end_col == nil or right_start_col == nil then
+		return false
+	end
+	if right_start_col < left_end_col then
+		return false
+	end
+	if right_start_col == left_end_col then
+		return true
+	end
+	local line = line_text(buf, row)
+	if not line then
+		return false
+	end
+	local gap = line:sub(left_end_col + 1, right_start_col)
+	return gap:match("^%s*$") ~= nil
+end
+
+local function can_merge_ranges(prev, cur, buf)
+	if not prev or not cur then
+		return false
+	end
+	if prev.start_row ~= prev.end_row or cur.start_row ~= cur.end_row then
+		return false
+	end
+	if prev.start_row ~= cur.start_row then
+		return false
+	end
+	if cur.start_col < prev.end_col then
+		return false
+	end
+	return whitespace_between(buf, prev.start_row, prev.end_col, cur.start_col)
+end
+
+local function clone_hunk(h)
+	return {
+		kind = h.kind,
+		src = clone_range(h.src),
+		dst = clone_range(h.dst),
+	}
+end
+
+local function hunk_start(h)
+	local r = h.src or h.dst
+	if not r then
+		return math.huge, math.huge
+	end
+	return r.start_row or math.huge, r.start_col or math.huge
+end
+
+local function extend_range(base, incoming)
+	if not base or not incoming then
+		return
+	end
+	if incoming.end_row > base.end_row or (incoming.end_row == base.end_row and incoming.end_col > base.end_col) then
+		base.end_row = incoming.end_row
+		base.end_col = incoming.end_col
+		base.end_line = incoming.end_line
+	end
+end
+
+local function can_merge_hunks(prev, cur, src_buf, dst_buf)
+	if not prev or not cur or prev.kind ~= cur.kind then
+		return false
+	end
+	if prev.kind == "change" then
+		return can_merge_ranges(prev.src, cur.src, src_buf) and can_merge_ranges(prev.dst, cur.dst, dst_buf)
+	end
+	if prev.kind == "insert" then
+		return can_merge_ranges(prev.dst, cur.dst, dst_buf)
+	end
+	if prev.kind == "delete" then
+		return can_merge_ranges(prev.src, cur.src, src_buf)
+	end
+	return false
+end
+
+local function merge_adjacent_hunks(hunks, src_buf, dst_buf)
+	if not hunks or #hunks <= 1 then
+		return hunks or {}
+	end
+	local ordered = {}
+	for _, h in ipairs(hunks) do
+		table.insert(ordered, clone_hunk(h))
+	end
+	table.sort(ordered, function(a, b)
+		local ar, ac = hunk_start(a)
+		local br, bc = hunk_start(b)
+		if ar == br then
+			return ac < bc
+		end
+		return ar < br
+	end)
+	local merged = {}
+	for _, h in ipairs(ordered) do
+		local prev = merged[#merged]
+		if prev and can_merge_hunks(prev, h, src_buf, dst_buf) then
+			extend_range(prev.src, h.src)
+			extend_range(prev.dst, h.dst)
+		else
+			table.insert(merged, h)
+		end
+	end
+	return merged
+end
+
 local function fallback_hunks_from_diff(src_node, dst_node, src_buf, dst_buf, rename_pairs)
 	local src_text = vim.treesitter.get_node_text(src_node, src_buf)
 	local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
@@ -329,23 +435,55 @@ local function fallback_hunks_from_diff(src_node, dst_node, src_buf, dst_buf, re
 			local match_src, match_dst = lcs_matches(tokens_src, tokens_dst, rename_map)
 			local src_spans = unmatched_token_spans(tokens_src, match_src, src_line)
 			local dst_spans = unmatched_token_spans(tokens_dst, match_dst, dst_line)
-			local count = math.min(#src_spans, #dst_spans)
-			for i = 1, count do
-				local src_range = make_range(
-					src_row,
-					src_base + src_spans[i].start_col - 1,
-					src_base + src_spans[i].end_col
-				)
-				local dst_range = make_range(
-					dst_row,
-					dst_base + dst_spans[i].start_col - 1,
-					dst_base + dst_spans[i].end_col
-				)
-				if src_range and dst_range then
-					table.insert(out, hunk_change(src_range, dst_range))
+			if #src_spans > 0 or #dst_spans > 0 then
+				local emitted = false
+				local span_count = math.min(#src_spans, #dst_spans)
+
+				for i = 1, span_count do
+					local src_range = make_range(
+						src_row,
+						src_base + src_spans[i].start_col - 1,
+						src_base + src_spans[i].end_col
+					)
+					local dst_range = make_range(
+						dst_row,
+						dst_base + dst_spans[i].start_col - 1,
+						dst_base + dst_spans[i].end_col
+					)
+					if src_range and dst_range then
+						table.insert(out, hunk_change(src_range, dst_range))
+						emitted = true
+					end
+				end
+
+				for i = span_count + 1, #src_spans do
+					local src_range = make_range(
+						src_row,
+						src_base + src_spans[i].start_col - 1,
+						src_base + src_spans[i].end_col
+					)
+					if src_range then
+						table.insert(out, hunk_change(src_range, nil))
+						emitted = true
+					end
+				end
+
+				for i = span_count + 1, #dst_spans do
+					local dst_range = make_range(
+						dst_row,
+						dst_base + dst_spans[i].start_col - 1,
+						dst_base + dst_spans[i].end_col
+					)
+					if dst_range then
+						table.insert(out, hunk_change(nil, dst_range))
+						emitted = true
+					end
+				end
+
+				if emitted then
+					return
 				end
 			end
-			return
 		end
 
 		local fragment = semantic.diff_fragment(src_line, dst_line)
@@ -422,6 +560,7 @@ function M.enrich(actions, opts)
 			local normalized_leaf = {}
 			local hunks = {}
 			local has_non_rename_change = false
+			local saw_precise_candidate = false
 
 			for _, change in ipairs(raw_leaf_changes) do
 				local src_range = range_metadata(change.src_node)
@@ -435,6 +574,9 @@ function M.enrich(actions, opts)
 
 				if change.src_text ~= change.dst_text and rename_pairs[change.src_text] ~= change.dst_text then
 					has_non_rename_change = true
+					if src_range and dst_range then
+						saw_precise_candidate = true
+					end
 					local hunk_src = src_range
 					local hunk_dst = dst_range
 
@@ -478,10 +620,11 @@ function M.enrich(actions, opts)
 
 			local rename_only = (#normalized_leaf > 0) and (next(rename_pairs) ~= nil) and not has_non_rename_change
 
-			if #hunks == 0 and not rename_only then
+			if #hunks == 0 and not rename_only and not saw_precise_candidate then
 				hunks = fallback_hunks_from_diff(action.src_node, action.dst_node, src_buf, dst_buf, rename_pairs)
 			end
-			if #suppressed_pairs > 0 and #hunks > 0 then
+
+			if #hunks > 0 and (#suppressed_pairs > 0 or next(declaration_pairs) ~= nil) then
 				local filtered = {}
 				for _, hunk in ipairs(hunks) do
 					if
@@ -500,6 +643,8 @@ function M.enrich(actions, opts)
 				end
 				hunks = filtered
 			end
+
+			hunks = merge_adjacent_hunks(hunks, src_buf, dst_buf)
 
 			action.analysis = {
 				leaf_changes = normalized_leaf,
