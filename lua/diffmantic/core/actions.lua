@@ -3,6 +3,13 @@ local semantic = require("diffmantic.core.semantic")
 local roles = require("diffmantic.core.roles")
 local analysis = require("diffmantic.core.analysis")
 
+local LITERAL_MEMBER_NODE_TYPES = {
+	pair = true,
+	keyed_element = true,
+	property_signature = true,
+	shorthand_property_identifier = true,
+}
+
 local function range_text(buf, range)
 	if not buf or not range then
 		return nil
@@ -68,6 +75,239 @@ local function has_effective_update_hunks(action, src_buf, dst_buf)
 		end
 	end
 	return false
+end
+
+local function range_contains(outer, inner)
+	if not outer or not inner then
+		return false
+	end
+	if outer.start_row == nil or outer.end_row == nil or outer.start_col == nil or outer.end_col == nil then
+		return false
+	end
+	if inner.start_row == nil or inner.end_row == nil or inner.start_col == nil or inner.end_col == nil then
+		return false
+	end
+	if inner.start_row < outer.start_row or inner.end_row > outer.end_row then
+		return false
+	end
+	if inner.start_row == outer.start_row and inner.start_col < outer.start_col then
+		return false
+	end
+	if inner.end_row == outer.end_row and inner.end_col > outer.end_col then
+		return false
+	end
+	return true
+end
+
+local function ranges_equal(a, b)
+	if not a or not b then
+		return false
+	end
+	return a.start_row == b.start_row
+		and a.start_col == b.start_col
+		and a.end_row == b.end_row
+		and a.end_col == b.end_col
+end
+
+local function ranges_related(a, b)
+	return ranges_equal(a, b) or range_contains(a, b) or range_contains(b, a)
+end
+
+local TEMP_RESULT_DECL_NODE_TYPES = {
+	lexical_declaration = true,
+	short_var_declaration = true,
+	init_declarator = true,
+	variable_declaration = true,
+	local_variable_declaration = true,
+}
+
+local function line_text(buf, row)
+	if not buf or row == nil then
+		return nil
+	end
+	local lines = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)
+	return lines and lines[1] or nil
+end
+
+local function action_side_text(action, buf, side)
+	if not action or not buf then
+		return nil
+	end
+	local node = side == "src" and action.src_node or action.dst_node
+	if node then
+		return vim.treesitter.get_node_text(node, buf)
+	end
+	local range = side == "src" and action.src or action.dst
+	return range_text(buf, range)
+end
+
+local function extract_assigned_identifier(text)
+	if not text or text == "" then
+		return nil
+	end
+	local id = text:match("^%s*[Cc]onst%s+([%a_][%w_]*)%s*=")
+		or text:match("^%s*[Ll]et%s+([%a_][%w_]*)%s*=")
+		or text:match("^%s*[Vv]ar%s+([%a_][%w_]*)%s*=")
+		or text:match("^%s*[Ll]ocal%s+([%a_][%w_]*)%s*=")
+		or text:match("^%s*([%a_][%w_]*)%s*:=")
+	if id then
+		return id
+	end
+	local lhs = text:match("^(.-)=")
+	if not lhs then
+		return nil
+	end
+	return lhs:match("([%a_][%w_]*)%s*$")
+end
+
+local function extract_return_identifier(text)
+	if not text or text == "" then
+		return nil
+	end
+	local expr = text:match("^%s*return%s+(.+)$")
+	if not expr then
+		return nil
+	end
+	local trimmed = expr:gsub("%s*;%s*$", ""):match("^%s*(.-)%s*$")
+	if not trimmed then
+		return nil
+	end
+	return trimmed:match("^%(*%s*([%a_][%w_]*)%s*%)?$")
+end
+
+local function mark_temp_result_refactor_overrides(actions_list, src_buf, dst_buf)
+	if not src_buf or not dst_buf then
+		return
+	end
+
+	local function mark_insert_actions_for_rows(update_action, declared_name, decl_row, ret_row)
+		for _, action in ipairs(actions_list) do
+			if action.type == "insert" and action.dst and range_contains(update_action.dst, action.dst) then
+				local node_type = action.metadata and action.metadata.node_type or nil
+				if action.dst.start_row == decl_row and TEMP_RESULT_DECL_NODE_TYPES[node_type] then
+					local decl_text = action_side_text(action, dst_buf, "dst") or line_text(dst_buf, decl_row)
+					if extract_assigned_identifier(decl_text) == declared_name then
+						action.metadata = action.metadata or {}
+						action.metadata.render_as_change = true
+					end
+				elseif action.dst.start_row == ret_row and node_type == "return_statement" then
+					local ret_text = action_side_text(action, dst_buf, "dst") or line_text(dst_buf, ret_row)
+					if extract_return_identifier(ret_text) == declared_name then
+						action.metadata = action.metadata or {}
+						action.metadata.render_as_change = true
+					end
+				end
+			end
+		end
+	end
+
+	for _, update_action in ipairs(actions_list) do
+		if update_action.type == "update" and update_action.dst then
+			local hunks = update_action.analysis and update_action.analysis.hunks or {}
+			for _, change_hunk in ipairs(hunks) do
+				if change_hunk.kind == "change" and change_hunk.src and change_hunk.dst then
+					local src_line = line_text(src_buf, change_hunk.src.start_row)
+					local dst_line = line_text(dst_buf, change_hunk.dst.start_row)
+					if src_line and dst_line and src_line:match("^%s*return%s+") then
+						local declared_name = extract_assigned_identifier(dst_line)
+						if declared_name then
+							local matched_insert = nil
+							for _, insert_hunk in ipairs(hunks) do
+								if
+									insert_hunk.kind == "insert"
+									and insert_hunk.dst
+									and insert_hunk.dst.start_row >= change_hunk.dst.start_row
+									and insert_hunk.dst.start_row <= change_hunk.dst.start_row + 2
+								then
+									local inserted_line = line_text(dst_buf, insert_hunk.dst.start_row)
+									if extract_return_identifier(inserted_line) == declared_name then
+										matched_insert = insert_hunk
+										break
+									end
+								end
+							end
+
+							if matched_insert then
+								matched_insert.render_as_change = true
+								mark_insert_actions_for_rows(
+									update_action,
+									declared_name,
+									change_hunk.dst.start_row,
+									matched_insert.dst.start_row
+								)
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function mark_literal_member_render_overrides(actions_list)
+	local update_contexts = {}
+	for _, action in ipairs(actions_list) do
+		if action.type == "update" then
+			local context = {
+				action = action,
+				src = action.src,
+				dst = action.dst,
+				src_change_hunks = {},
+				dst_change_hunks = {},
+			}
+			local hunks = action.analysis and action.analysis.hunks or {}
+			for _, hunk in ipairs(hunks) do
+				if hunk.kind == "change" then
+					if hunk.src then
+						table.insert(context.src_change_hunks, hunk.src)
+					end
+					if hunk.dst then
+						table.insert(context.dst_change_hunks, hunk.dst)
+					end
+				end
+			end
+			table.insert(update_contexts, context)
+		end
+	end
+
+	local function overlaps_any(ranges, target)
+		if not target then
+			return false
+		end
+		for _, r in ipairs(ranges) do
+			if ranges_related(r, target) then
+				return true
+			end
+		end
+		return false
+	end
+
+	for _, action in ipairs(actions_list) do
+		if action.type == "insert" or action.type == "delete" then
+			local metadata = action.metadata or {}
+			if LITERAL_MEMBER_NODE_TYPES[metadata.node_type] then
+				local target = action.type == "insert" and action.dst or action.src
+				for _, context in ipairs(update_contexts) do
+					local container = action.type == "insert" and context.dst or context.src
+					local change_hunks = action.type == "insert" and context.dst_change_hunks or context.src_change_hunks
+					-- Key-aware policy: only override inserts/deletes that overlap replacement hunks.
+					if range_contains(container, target) and overlaps_any(change_hunks, target) then
+						action.metadata = action.metadata or {}
+						action.metadata.render_as_change = true
+						local hunks = context.action.analysis and context.action.analysis.hunks or {}
+						for _, hunk in ipairs(hunks) do
+							if action.type == "insert" and hunk.kind == "insert" and ranges_related(hunk.dst, action.dst) then
+								hunk.render_as_change = true
+							elseif action.type == "delete" and hunk.kind == "delete" and ranges_related(hunk.src, action.src) then
+								hunk.render_as_change = true
+							end
+						end
+						break
+					end
+				end
+			end
+		end
+	end
 end
 
 local function range_metadata(node)
@@ -236,6 +476,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	local actions = {}
 	local timings = nil
 	local hrtime = nil
+	local src_has_parse_error = src_root and src_root.has_error and src_root:has_error() or false
+	local dst_has_parse_error = dst_root and dst_root.has_error and dst_root:has_error() or false
+	local has_parse_error = src_has_parse_error or dst_has_parse_error
 	if opts and opts.timings then
 		timings = {}
 		if vim and vim.loop and vim.loop.hrtime then
@@ -271,7 +514,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			local src_node = action.src_node
 			local dst_node = action.dst_node
 			if action.type == "update" and src_node and dst_node then
-				local leaf_changes = semantic.find_leaf_changes(src_node, dst_node, src_buf, dst_buf)
+				local leaf_changes = semantic.find_leaf_changes(src_node, dst_node, src_buf, dst_buf, src_role_index, dst_role_index)
 				local rename_pairs = {}
 				for _, change in ipairs(leaf_changes) do
 					if
@@ -845,10 +1088,25 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 
 	-- Mark nodes NOT in LIS as moved (only if line difference is significant)
+	local function has_structural_move_evidence(index)
+		local dst_line = movable_pairs[index].dst_line
+		for j, other in ipairs(movable_pairs) do
+			if j ~= index then
+				local dst_inversion = (j < index and other.dst_line > dst_line) or (j > index and other.dst_line < dst_line)
+				if dst_inversion then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	-- Mark nodes NOT in LIS as moved only when there is real order inversion evidence.
+	-- If parse errors exist in either tree, keep move emission conservative.
 	for i, pair in ipairs(movable_pairs) do
 		if not in_lis[i] then
 			local line_diff = math.abs(pair.dst_line - pair.src_line)
-			if line_diff > 3 then
+			if not has_parse_error and line_diff > 3 and has_structural_move_evidence(i) then
 				local s = src_info[pair.src_id]
 				local d = dst_info[pair.dst_id]
 				if s and d then
@@ -917,17 +1175,21 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if action.type == "update" then
 			local key = action_pair_key(action)
 			local action_analysis = action.analysis or {}
-			local has_hunks = has_effective_update_hunks(action, src_buf, dst_buf)
+			local has_effective_hunks = has_effective_update_hunks(action, src_buf, dst_buf)
+			local has_any_hunks = action_analysis.hunks and #action_analysis.hunks > 0
 			local has_rename_pairs = action_analysis.rename_pairs and next(action_analysis.rename_pairs) ~= nil
 			local overlaps_decl_rename = key and declaration_rename_pairs[key] or false
 			local overlaps_move = key and moved_pairs[key] or false
-			if action_analysis.rename_only and has_rename_pairs and not has_hunks then
+			if action_analysis.rename_only and has_rename_pairs and not has_effective_hunks then
 				goto continue
 			end
-			if overlaps_decl_rename and not has_hunks then
+			if overlaps_decl_rename and not has_effective_hunks then
 				goto continue
 			end
-			if overlaps_move and not has_hunks then
+			if overlaps_move and not has_effective_hunks then
+				goto continue
+			end
+			if not has_effective_hunks and not has_any_hunks then
 				goto continue
 			end
 		end
@@ -936,6 +1198,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 	actions = filtered_actions
 	stop_timer(update_suppress_start, "update_suppress")
+
+	mark_temp_result_refactor_overrides(actions, src_buf, dst_buf)
+	mark_literal_member_render_overrides(actions)
 
 	local summary_start = start_timer()
 	local summary = build_summary(actions)
