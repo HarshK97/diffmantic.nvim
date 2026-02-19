@@ -7,6 +7,7 @@ local HL_PRIORITY = {
 	DiffmanticAdd = 20,
 	DiffmanticDelete = 20,
 	DiffmanticChange = 30,
+	DiffmanticChangeAccent = 35,
 	DiffmanticRename = 40,
 }
 
@@ -43,6 +44,40 @@ local function apply_sign(buf, ns, row, text, hl_group, seen_rows)
 		return
 	end
 	signs.mark(buf, ns, row, 0, text, hl_group, seen_rows)
+end
+
+local function ranges_overlap(a, b)
+	if not a or not b then
+		return false
+	end
+	if a.start_row == nil or a.end_row == nil or a.start_col == nil or a.end_col == nil then
+		return false
+	end
+	if b.start_row == nil or b.end_row == nil or b.start_col == nil or b.end_col == nil then
+		return false
+	end
+	if a.end_row < b.start_row or b.end_row < a.start_row then
+		return false
+	end
+	if a.start_row == b.end_row and a.start_col >= b.end_col then
+		return false
+	end
+	if b.start_row == a.end_row and b.start_col >= a.end_col then
+		return false
+	end
+	return true
+end
+
+local function overlaps_any(range, ranges)
+	if not range or not ranges then
+		return false
+	end
+	for _, candidate in ipairs(ranges) do
+		if ranges_overlap(range, candidate) then
+			return true
+		end
+	end
+	return false
 end
 
 local function apply_virt(buf, ns, row, col, text, hl_group, pos)
@@ -158,37 +193,65 @@ end
 function M.render(src_buf, dst_buf, actions, ns)
 	local src_sign_rows = {}
 	local dst_sign_rows = {}
+	local src_move_ranges = {}
+	local dst_move_ranges = {}
+
+	for _, action in ipairs(actions) do
+		if action.type == "move" then
+			if action.src then
+				table.insert(src_move_ranges, action.src)
+			end
+			if action.dst then
+				table.insert(dst_move_ranges, action.dst)
+			end
+		end
+	end
 
 
 	for _, action in ipairs(actions) do
-		local style = TYPE_STYLE[action.type]
-		if style then
+		local base_style = TYPE_STYLE[action.type]
+		if base_style then
 			local src = action.src
 			local dst = action.dst
 			local meta = action.metadata or {}
+			local style = base_style
+			if (action.type == "insert" or action.type == "delete") and meta.render_as_change then
+				style = TYPE_STYLE.update
+			end
 
 			if action.type == "update" then
 				local effective_hunks = effective_update_hunks(action, src_buf, dst_buf)
 				if #effective_hunks == 0 then
 					goto continue
 				end
-				local rendered_hunk = false
-				for _, hunk in ipairs(effective_hunks) do
-					local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
-					if hunk.src and hstyle.src_hl then
-						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
-						apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
-						rendered_hunk = true
+					local rendered_hunk = false
+					for _, hunk in ipairs(effective_hunks) do
+						local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
+						if hunk.render_as_change then
+							hstyle = HUNK_STYLE.change
+						end
+							if hunk.src and hstyle.src_hl then
+								apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
+								if hstyle.src_hl == "DiffmanticChange" and overlaps_any(hunk.src, src_move_ranges) then
+									-- Add a foreground/underline accent so updates stay visible over moved regions.
+									apply_span(src_buf, ns, hunk.src, "DiffmanticChangeAccent")
+								end
+								apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
+								rendered_hunk = true
+							end
+							if hunk.dst and hstyle.dst_hl then
+								apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
+								if hstyle.dst_hl == "DiffmanticChange" and overlaps_any(hunk.dst, dst_move_ranges) then
+									-- Add a foreground/underline accent so updates stay visible over moved regions.
+									apply_span(dst_buf, ns, hunk.dst, "DiffmanticChangeAccent")
+								end
+								apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
+								rendered_hunk = true
+							end
 					end
-					if hunk.dst and hstyle.dst_hl then
-						apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
-						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
-						rendered_hunk = true
+					if not rendered_hunk then
+						goto continue
 					end
-				end
-				if not rendered_hunk then
-					goto continue
-				end
 			else
 				if src then
 					apply_span(src_buf, ns, src, style.hl)

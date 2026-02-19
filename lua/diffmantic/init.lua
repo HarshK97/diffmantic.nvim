@@ -35,7 +35,11 @@ local function setup_highlights()
 	local add_bg = pick_bg({ "DiffAdd", "DiffText" })
 	local delete_bg = pick_bg({ "DiffDelete", "DiffText" })
 	local change_bg = pick_bg({ "DiffText", "DiffChange" })
-	local move_bg = pick_bg({ "DiffText", "DiffChange" })
+	local move_bg = pick_bg({ "DiffChange", "DiffText" })
+	if move_bg == change_bg then
+		-- If move and change resolve to the same background, de-emphasize move fill so updates remain visible.
+		move_bg = nil
+	end
 
 	local add_sign_fg = pick_fg({ "DiffAdd" }, 0x49D17D)
 	local delete_sign_fg = pick_fg({ "DiffDelete" }, 0xFF6B6B)
@@ -45,7 +49,8 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "DiffmanticAdd", { fg = add_sign_fg, bg = add_bg })
 	vim.api.nvim_set_hl(0, "DiffmanticDelete", { fg = delete_sign_fg, bg = delete_bg })
 	vim.api.nvim_set_hl(0, "DiffmanticChange", { fg = change_sign_fg, bg = change_bg })
-	vim.api.nvim_set_hl(0, "DiffmanticMove", { fg = move_sign_fg, bg = move_bg })
+	vim.api.nvim_set_hl(0, "DiffmanticChangeAccent", { fg = change_sign_fg, bg = "NONE", underline = true, bold = true })
+	vim.api.nvim_set_hl(0, "DiffmanticMove", { fg = move_sign_fg, bg = move_bg or "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticRename", { fg = change_sign_fg, underline = true, bold = true, italic = true })
 
 	vim.api.nvim_set_hl(0, "DiffmanticAddSign", { fg = add_sign_fg, bg = "NONE" })
