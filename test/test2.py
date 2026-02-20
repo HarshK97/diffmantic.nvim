@@ -2,11 +2,6 @@
 # Tests: Move, Update, Insert, Rename
 
 
-def calculate_difference(a, b):
-    """Subtract two numbers."""
-    return a - b
-
-
 def calculate_sum(a, b):
     """Add two numbers."""
     return a + b
@@ -33,6 +28,11 @@ class ApiClientV2:
 
     def fetch_data(self, path):
         return self.base_url + path
+
+
+def calculate_difference(x, y):
+    """Subtract two numbers."""
+    return x - y
 
 
 # Configuration
