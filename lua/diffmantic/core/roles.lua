@@ -44,7 +44,11 @@ local function add_capture(index, capture, node)
 	index.by_node[id][capture] = true
 
 	index.by_capture[capture] = index.by_capture[capture] or {}
-	index.by_capture[capture][id] = node
+	if not index.by_capture[capture][id] then
+		index.by_capture[capture][id] = node
+		index.by_capture_list[capture] = index.by_capture_list[capture] or {}
+		table.insert(index.by_capture_list[capture], node)
+	end
 end
 
 local function resolve_lang(bufnr)
@@ -84,6 +88,10 @@ function M.build_index(root, bufnr)
 		lang = lang,
 		by_node = {},
 		by_capture = {},
+		by_capture_list = {},
+		_descendant_capture_cache = {},
+		_kind_name_node_cache = {},
+		_kind_name_text_cache = {},
 	}
 
 	for id, node in query:iter_captures(root, bufnr, 0, -1) do
@@ -109,17 +117,27 @@ function M.find_descendant_with_capture(node, index, capture)
 		return nil
 	end
 
-	local by_capture = index.by_capture[capture]
+	local cache_key = capture .. ":" .. tostring(node:id())
+	local cache = index._descendant_capture_cache
+	local cached = cache[cache_key]
+	if cached ~= nil then
+		return cached or nil
+	end
+
+	local by_capture = index.by_capture_list[capture]
 	if not by_capture then
+		cache[cache_key] = false
 		return nil
 	end
 
-	for _, captured in pairs(by_capture) do
+	for _, captured in ipairs(by_capture) do
 		if node:equal(captured) or node:child_with_descendant(captured) then
+			cache[cache_key] = captured
 			return captured
 		end
 	end
 
+	cache[cache_key] = false
 	return nil
 end
 
@@ -154,16 +172,39 @@ function M.has_structural_kind(node, index, kind)
 end
 
 function M.get_kind_name_node(node, index, kind)
+	if not node or not index then
+		return nil
+	end
+	local key = kind .. ":" .. tostring(node:id())
+	local cache = index._kind_name_node_cache
+	local cached = cache[key]
+	if cached ~= nil then
+		return cached or nil
+	end
 	local capture = string.format("diff.%s.name", kind)
-	return M.find_descendant_with_capture(node, index, capture)
+	local found = M.find_descendant_with_capture(node, index, capture)
+	cache[key] = found or false
+	return found
 end
 
 function M.get_kind_name_text(node, index, bufnr, kind)
-	local name_node = M.get_kind_name_node(node, index, kind)
-	if not name_node then
+	if not node or not index then
 		return nil
 	end
-	return vim.treesitter.get_node_text(name_node, bufnr)
+	local key = kind .. ":" .. tostring(node:id())
+	local cache = index._kind_name_text_cache
+	local cached = cache[key]
+	if cached ~= nil then
+		return cached or nil
+	end
+	local name_node = M.get_kind_name_node(node, index, kind)
+	if not name_node then
+		cache[key] = false
+		return nil
+	end
+	local text = vim.treesitter.get_node_text(name_node, bufnr)
+	cache[key] = text or false
+	return text
 end
 
 return M
