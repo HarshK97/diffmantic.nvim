@@ -2,14 +2,13 @@ local ts_utils = require("diffmantic.treesitter")
 
 local M = {}
 
-local function node_key(node)
-	local sr, sc, er, ec = node:range()
-	return sr, sc, er, ec
+local function node_key(info)
+	return info.start_row, info.start_col, info.end_row, info.end_col
 end
 
 local function compare_node_order(a, b)
-	local asr, asc, aer, aec = node_key(a.node)
-	local bsr, bsc, ber, bec = node_key(b.node)
+	local asr, asc, aer, aec = node_key(a)
+	local bsr, bsc, ber, bec = node_key(b)
 	if asr ~= bsr then
 		return asr < bsr
 	end
@@ -27,14 +26,17 @@ end
 
 -- Top-down matching: match nodes from the top of the tree downwards
 -- Matches nodes with the same hash at each height level
-function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
+function M.top_down_match(src_root, dst_root, src_buf, dst_buf, opts)
+	opts = opts or {}
 	local mappings = {}
-	local src_info = ts_utils.preprocess_tree(src_root, src_buf)
-	local dst_info = ts_utils.preprocess_tree(dst_root, dst_buf)
+	local src_info = opts.src_info or ts_utils.preprocess_tree(src_root, src_buf, opts)
+	local dst_info = opts.dst_info or ts_utils.preprocess_tree(dst_root, dst_buf, opts)
 
 	local src_mapped = {}
 	local dst_mapped = {}
 	local src_to_dst = {}
+	local src_root_id = src_root:id()
+	local dst_root_id = dst_root:id()
 
 	-- Group nodes by their height in the tree
 	local function get_nodes_by_height(info)
@@ -55,24 +57,26 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 	local src_by_height = get_nodes_by_height(src_info)
 	local dst_by_height = get_nodes_by_height(dst_info)
 
-	local function parents_are_compatible(src_data, dst_data)
-		local src_parent = src_data.parent
-		local dst_parent = dst_data.parent
-
-		if not src_parent and not dst_parent then
-			return true
+	local function dst_parent_key(info)
+		local parent_id = info.parent_id
+		if not parent_id then
+			return 0
 		end
-		if not src_parent or not dst_parent then
-			return false
+		if parent_id == dst_root_id then
+			return dst_root_id
 		end
+		return parent_id
+	end
 
-		local src_parent_id = src_parent:id()
-		local dst_parent_id = dst_parent:id()
-		if src_parent_id == src_root:id() and dst_parent_id == dst_root:id() then
-			return true
+	local function src_parent_key(info)
+		local parent_id = info.parent_id
+		if not parent_id then
+			return 0
 		end
-
-		return src_to_dst[src_parent_id] == dst_parent_id
+		if parent_id == src_root_id then
+			return dst_root_id
+		end
+		return src_to_dst[parent_id] or -1
 	end
 
 	-- Find the maximum height in both trees
@@ -88,36 +92,51 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf)
 		end
 	end
 
-	-- For each height, match nodes with the same hash using hash indexing
+	-- For each height, match nodes with the same hash and compatible mapped parent.
+	-- Parent buckets avoid O(k) scans through all same-hash candidates.
 	for h = max_h, 1, -1 do
 		local s_nodes = src_by_height[h] or {}
 		local d_nodes = dst_by_height[h] or {}
 
-		local dst_by_hash = {}
+		local dst_by_hash_parent = {}
 		for _, d in ipairs(d_nodes) do
 			if not dst_mapped[d.id] then
-				if not dst_by_hash[d.hash] then
-					dst_by_hash[d.hash] = {}
+				local hash_buckets = dst_by_hash_parent[d.hash]
+				if not hash_buckets then
+					hash_buckets = {}
+					dst_by_hash_parent[d.hash] = hash_buckets
 				end
-				table.insert(dst_by_hash[d.hash], d)
+
+				local pkey = dst_parent_key(d)
+				local queue = hash_buckets[pkey]
+				if not queue then
+					queue = { head = 1, items = {} }
+					hash_buckets[pkey] = queue
+				end
+				local items = queue.items
+				items[#items + 1] = d
 			end
 		end
 
 		for _, s in ipairs(s_nodes) do
 			if not src_mapped[s.id] then
-				local candidates = dst_by_hash[s.hash]
-					if candidates then
-						for i, d in ipairs(candidates) do
-							if not dst_mapped[d.id] and parents_are_compatible(s, d) then
-								table.insert(mappings, { src = s.id, dst = d.id })
-								src_mapped[s.id] = true
-								dst_mapped[d.id] = true
-								src_to_dst[s.id] = d.id
-								table.remove(candidates, i)
-								break
-							end
+				local pkey = src_parent_key(s)
+				if pkey ~= -1 then
+					local hash_buckets = dst_by_hash_parent[s.hash]
+					local queue = hash_buckets and hash_buckets[pkey] or nil
+					if queue then
+						local head = queue.head
+						local items = queue.items
+						local d = items[head]
+						if d then
+							queue.head = head + 1
+							table.insert(mappings, { src = s.id, dst = d.id })
+							src_mapped[s.id] = true
+							dst_mapped[d.id] = true
+							src_to_dst[s.id] = d.id
 						end
 					end
+				end
 			end
 		end
 	end
