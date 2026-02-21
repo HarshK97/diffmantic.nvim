@@ -1,13 +1,16 @@
 local M = {}
 
-local function node_key(node)
-	local sr, sc, er, ec = node:range()
+local function node_key(info)
+	if info.start_row ~= nil then
+		return info.start_row, info.start_col, info.end_row, info.end_col
+	end
+	local sr, sc, er, ec = info.node:range()
 	return sr, sc, er, ec
 end
 
 local function compare_info_order(a_info, b_info)
-	local asr, asc, aer, aec = node_key(a_info.node)
-	local bsr, bsc, ber, bec = node_key(b_info.node)
+	local asr, asc, aer, aec = node_key(a_info)
+	local bsr, bsc, ber, bec = node_key(b_info)
 	if asr ~= bsr then
 		return asr < bsr
 	end
@@ -24,7 +27,9 @@ local function compare_info_order(a_info, b_info)
 end
 
 -- Recovery matching: tries to match remaining unmapped nodes using LCS and unique type.
-function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf)
+function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf, opts)
+	opts = opts or {}
+	local lcs_cell_limit = opts.recovery_lcs_cell_limit or 6000
 	local skip_unique_type_match = {
 		field_declaration = true,
 	}
@@ -46,12 +51,32 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		return s[hash_key] == d[hash_key] and src_node:type() == dst_node:type()
 	end
 
+	local function greedy_lcs(src_list, dst_list, hash_key)
+		local result = {}
+		local j = 1
+		for i = 1, #src_list do
+			local src_node = src_list[i]
+			while j <= #dst_list do
+				local dst_node = dst_list[j]
+				j = j + 1
+				if can_match(src_node, dst_node, hash_key) then
+					table.insert(result, { src = src_node, dst = dst_node })
+					break
+				end
+			end
+		end
+		return result
+	end
+
 	-- Longest Common Subsequence (LCS) for matching children.
 	-- Reconstructed left-to-right so duplicate-compatible nodes prefer earlier dst siblings.
 	local function lcs(src_list, dst_list, hash_key)
 		local m, n = #src_list, #dst_list
 		if m == 0 or n == 0 then
 			return {}
+		end
+		if (m * n) > lcs_cell_limit then
+			return greedy_lcs(src_list, dst_list, hash_key)
 		end
 
 		local dp = {}
@@ -96,6 +121,41 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		return result
 	end
 
+	local function has_unmatched_on_both_sides(src_node, dst_node)
+		local src_has = false
+		for child in src_node:iter_children() do
+			if not src_to_dst[child:id()] then
+				src_has = true
+				break
+			end
+		end
+		if not src_has then
+			return false
+		end
+		for child in dst_node:iter_children() do
+			if not dst_to_src[child:id()] then
+				return true
+			end
+		end
+		return false
+	end
+
+	local pending = {}
+	local queued = {}
+
+	local function queue_key(src_id, dst_id)
+		return tostring(src_id) .. ":" .. tostring(dst_id)
+	end
+
+	local function enqueue(src_id, dst_id)
+		local key = queue_key(src_id, dst_id)
+		if queued[key] then
+			return
+		end
+		queued[key] = true
+		pending[#pending + 1] = { src_id = src_id, dst_id = dst_id, key = key }
+	end
+
 	-- Helper to add a mapping and update lookup tables.
 	local function add_mapping(src_id, dst_id)
 		if src_to_dst[src_id] or dst_to_src[dst_id] then
@@ -104,6 +164,11 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		table.insert(mappings, { src = src_id, dst = dst_id })
 		src_to_dst[src_id] = dst_id
 		dst_to_src[dst_id] = src_id
+		local src_entry = src_info[src_id]
+		local dst_entry = dst_info[dst_id]
+		if src_entry and dst_entry and has_unmatched_on_both_sides(src_entry.node, dst_entry.node) then
+			enqueue(src_id, dst_id)
+		end
 		return true
 	end
 
@@ -133,7 +198,6 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		-- Step 1: match children with same hash (exact match).
 		for _, match in ipairs(lcs(src_children, dst_children, "hash")) do
 			if add_mapping(match.src:id(), match.dst:id()) then
-				-- Recurse immediately so children of newly matched nodes are not skipped by outer ordering.
 				simple_recovery(match.src, match.dst)
 			end
 		end
@@ -142,7 +206,6 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		src_children, dst_children = unmatched_children(src_node, dst_node)
 		for _, match in ipairs(lcs(src_children, dst_children, "structure_hash")) do
 			if match.src:type() ~= "field_declaration" and add_mapping(match.src:id(), match.dst:id()) then
-				-- Recurse immediately for the same reason as Step 1.
 				simple_recovery(match.src, match.dst)
 			end
 		end
@@ -173,20 +236,22 @@ function M.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_
 		end
 	end
 
-	-- Apply recovery to all mapped nodes.
-	local src_ids = {}
-	for id in pairs(src_info) do
-		table.insert(src_ids, id)
+	-- Seed worklist only with mapped pairs that still have unmatched children on both sides.
+	for _, mapping in ipairs(mappings) do
+		local src_entry = src_info[mapping.src]
+		local dst_entry = dst_info[mapping.dst]
+		if src_entry and dst_entry and has_unmatched_on_both_sides(src_entry.node, dst_entry.node) then
+			enqueue(mapping.src, mapping.dst)
+		end
 	end
-	table.sort(src_ids, function(a, b)
-		return compare_info_order(src_info[a], src_info[b])
-	end)
 
-	for _, id in ipairs(src_ids) do
-		local info = src_info[id]
-		local dst_id = src_to_dst[id]
-		if dst_id then
-			simple_recovery(info.node, dst_info[dst_id].node)
+	while #pending > 0 do
+		local pair = table.remove(pending)
+		queued[pair.key] = nil
+		local src_entry = src_info[pair.src_id]
+		local dst_entry = dst_info[pair.dst_id]
+		if src_entry and dst_entry and has_unmatched_on_both_sides(src_entry.node, dst_entry.node) then
+			simple_recovery(src_entry.node, dst_entry.node)
 		end
 	end
 
