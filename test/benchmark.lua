@@ -4,6 +4,7 @@
 
 local core = require("diffmantic.core")
 local ts = require("diffmantic.treesitter")
+local roles = require("diffmantic.core.roles")
 
 -- Redirect output to file for headless mode
 local output_file = io.open("/tmp/gumtree_benchmark.txt", "w")
@@ -121,23 +122,44 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 	local dst_tree = dst_parser:parse()[1]
 	local src_root = src_tree:root()
 	local dst_root = dst_tree:root()
+	local src_role_index = roles.build_index(src_root, src_buf)
+	local dst_role_index = roles.build_index(dst_root, dst_buf)
 
 	-- Benchmark the full matching pipeline
 	local start_total = vim.loop.hrtime()
 
 	-- Top-down match (includes preprocessing internally)
 	local start_topdown = vim.loop.hrtime()
-	local mappings, src_info, dst_info = core.top_down_match(src_root, dst_root, src_buf, dst_buf)
+	local mappings, src_info, dst_info = core.top_down_match(src_root, dst_root, src_buf, dst_buf, {
+		adaptive_mode = true,
+	})
 	local topdown_time = (vim.loop.hrtime() - start_topdown) / 1e6
+
+	local src_node_count = 0
+	local dst_node_count = 0
+	for _ in pairs(src_info) do
+		src_node_count = src_node_count + 1
+	end
+	for _ in pairs(dst_info) do
+		dst_node_count = dst_node_count + 1
+	end
+	local max_nodes = math.max(src_node_count, dst_node_count)
 
 	-- Bottom-up match
 	local start_bottomup = vim.loop.hrtime()
-	mappings = core.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src_buf, dst_buf)
+	mappings = core.bottom_up_match(mappings, src_info, dst_info, src_root, dst_root, src_buf, dst_buf, {
+		src_role_index = src_role_index,
+		dst_role_index = dst_role_index,
+		adaptive_mode = true,
+	})
 	local bottomup_time = (vim.loop.hrtime() - start_bottomup) / 1e6
 
 	-- Recovery match (simple recovery)
 	local start_recovery = vim.loop.hrtime()
-	mappings = core.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf)
+	mappings = core.recovery_match(src_root, dst_root, mappings, src_info, dst_info, src_buf, dst_buf, {
+		recovery_lcs_cell_limit = max_nodes >= 25000 and 1500 or 6000,
+		adaptive_mode = true,
+	})
 	local recovery_time = (vim.loop.hrtime() - start_recovery) / 1e6
 
 	-- Generate actions
@@ -146,6 +168,9 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 		timings = true,
 		src_buf = src_buf,
 		dst_buf = dst_buf,
+		src_role_index = src_role_index,
+		dst_role_index = dst_role_index,
+		adaptive_mode = true,
 	})
 	local actions_time = (vim.loop.hrtime() - start_actions) / 1e6
 
@@ -174,11 +199,15 @@ local function run_benchmark(name, num_functions, vars_per_function, changes)
 	log(string.format("  Actions:     %8.2f ms", actions_time))
 	if action_timings then
 		log(string.format("    Prep:      %8.2f ms", action_timings.precompute or 0))
+		log(string.format("    Roles:     %8.2f ms", action_timings.roles or 0))
 		log(string.format("    Updates:   %8.2f ms", action_timings.updates or 0))
 		log(string.format("    Moves:     %8.2f ms", action_timings.moves or 0))
 		log(string.format("    Renames:   %8.2f ms", action_timings.renames or 0))
 		log(string.format("    Deletes:   %8.2f ms", action_timings.deletes or 0))
 		log(string.format("    Inserts:   %8.2f ms", action_timings.inserts or 0))
+		log(string.format("    Semantic:  %8.2f ms", action_timings.semantic or 0))
+		log(string.format("    Analysis:  %8.2f ms", action_timings.analysis or 0))
+		log(string.format("    Suppress:  %8.2f ms", action_timings.update_suppress or 0))
 	end
 	log(string.format("  TOTAL:       %8.2f ms", total_time))
 
