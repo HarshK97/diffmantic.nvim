@@ -2,6 +2,7 @@ local M = {}
 local core = require("diffmantic.core")
 local ui = require("diffmantic.ui")
 local debug_utils = require("diffmantic.debug_utils")
+local roles = require("diffmantic.core.roles")
 
 local function hl(name)
 	local ok, value = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
@@ -122,21 +123,44 @@ function M.diff(args)
 	end
 	local root1 = parser1:parse()[1]:root()
 	local root2 = parser2:parse()[1]:root()
+	local src_role_index = roles.build_index(root1, buf1)
+	local dst_role_index = roles.build_index(root2, buf2)
 
-	local mappings, src_info, dst_info = core.top_down_match(root1, root2, buf1, buf2)
+	local mappings, src_info, dst_info = core.top_down_match(root1, root2, buf1, buf2, {
+		adaptive_mode = true,
+	})
 	-- print("Top-down mappings: " .. #mappings)
 
 	-- local before_bottom_up = #mappings
-	mappings = core.bottom_up_match(mappings, src_info, dst_info, root1, root2, buf1, buf2)
+	mappings = core.bottom_up_match(mappings, src_info, dst_info, root1, root2, buf1, buf2, {
+		src_role_index = src_role_index,
+		dst_role_index = dst_role_index,
+		adaptive_mode = true,
+	})
 	-- print("Mappings after Bottom-up: " .. #mappings .. " (+" .. (#mappings - before_bottom_up) .. " new)")
 
 	-- local before_recovery = #mappings
-	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2)
+	local src_count = 0
+	local dst_count = 0
+	for _ in pairs(src_info) do
+		src_count = src_count + 1
+	end
+	for _ in pairs(dst_info) do
+		dst_count = dst_count + 1
+	end
+	local max_nodes = math.max(src_count, dst_count)
+	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2, {
+		recovery_lcs_cell_limit = max_nodes >= 25000 and 1500 or 6000,
+		adaptive_mode = true,
+	})
 	-- debug_utils.print_recovery_mappings(mappings, before_recovery, src_info, dst_info, buf1, buf2)
 
 	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info, {
 		src_buf = buf1,
 		dst_buf = buf2,
+		src_role_index = src_role_index,
+		dst_role_index = dst_role_index,
+		adaptive_mode = true,
 	})
 
 	-- debug_utils.print_actions(actions, buf1, buf2)

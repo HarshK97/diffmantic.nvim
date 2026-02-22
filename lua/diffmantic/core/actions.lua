@@ -473,21 +473,24 @@ end
 -- Generate edit actions from node mappings
 -- Actions describe what changed: insert, delete, update, move, rename
 function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, opts)
+	opts = opts or {}
 	local actions = {}
 	local timings = nil
 	local hrtime = nil
 	local src_has_parse_error = src_root and src_root.has_error and src_root:has_error() or false
 	local dst_has_parse_error = dst_root and dst_root.has_error and dst_root:has_error() or false
 	local has_parse_error = src_has_parse_error or dst_has_parse_error
-	if opts and opts.timings then
+	if opts.timings then
 		timings = {}
 		if vim and vim.loop and vim.loop.hrtime then
 			hrtime = vim.loop.hrtime
 		end
 	end
 
-	local src_role_index = nil
-	local dst_role_index = nil
+	local src_role_index = opts.src_role_index or nil
+	local dst_role_index = opts.dst_role_index or nil
+	local src_buf = opts.src_buf or nil
+	local dst_buf = opts.dst_buf or nil
 
 	local function start_timer()
 		if not hrtime then
@@ -504,8 +507,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 
 	local function enrich_update_actions_with_semantics(actions_list)
-		local src_buf = opts and opts.src_buf or nil
-		local dst_buf = opts and opts.dst_buf or nil
 		if not src_buf or not dst_buf then
 			return
 		end
@@ -536,8 +537,6 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	local function emit_rename_actions(actions_list)
 		local renames = {}
 		local seen = {}
-		local src_buf = opts and opts.src_buf or nil
-		local dst_buf = opts and opts.dst_buf or nil
 		local is_buf_available = src_buf and dst_buf
 
 		local function pair_key(from_text, to_text)
@@ -797,11 +796,13 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	end
 
 	local roles_start = start_timer()
-	local src_buf = opts and opts.src_buf or nil
-	local dst_buf = opts and opts.dst_buf or nil
 	if src_buf and dst_buf then
-		src_role_index = roles.build_index(src_root, src_buf)
-		dst_role_index = roles.build_index(dst_root, dst_buf)
+		if not src_role_index then
+			src_role_index = roles.build_index(src_root, src_buf)
+		end
+		if not dst_role_index then
+			dst_role_index = roles.build_index(dst_root, dst_buf)
+		end
 	end
 	stop_timer(roles_start, "roles")
 
@@ -939,66 +940,68 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 	end
 
-	-- Precompute ancestry flags for source nodes (unmapped significant ancestors)
-	local src_has_unmapped_sig_ancestor = {}
-	for id, info in pairs(src_info) do
-		local current = info.parent
-		while current do
-			local p_id = current:id()
-			local p_info = src_info[p_id]
-			if p_info then
-				if not src_to_dst[p_id] and is_significant(p_info, src_role_index) then
-					src_has_unmapped_sig_ancestor[id] = true
-					break
-				end
-				current = p_info.parent
-			else
-				break
-			end
+	local function parent_id_of(info)
+		if not info then
+			return nil
 		end
+		if info.parent_id ~= nil then
+			return info.parent_id
+		end
+		return info.parent and info.parent:id() or nil
 	end
+
+	local function memoized_ancestor_flags(info_map, predicate)
+		local memo = {}
+		local function has_match(id)
+			local cached = memo[id]
+			if cached ~= nil then
+				return cached
+			end
+			local info = info_map[id]
+			if not info then
+				memo[id] = false
+				return false
+			end
+			local parent_id = parent_id_of(info)
+			if not parent_id then
+				memo[id] = false
+				return false
+			end
+			local parent_info = info_map[parent_id]
+			if not parent_info then
+				memo[id] = false
+				return false
+			end
+			if predicate(parent_id, parent_info) then
+				memo[id] = true
+				return true
+			end
+			local result = has_match(parent_id)
+			memo[id] = result
+			return result
+		end
+		for id in pairs(info_map) do
+			has_match(id)
+		end
+		return memo
+	end
+
+	-- Precompute ancestry flags for source nodes (unmapped significant ancestors)
+	local src_has_unmapped_sig_ancestor = memoized_ancestor_flags(src_info, function(parent_id, parent_info)
+		return not src_to_dst[parent_id] and is_significant(parent_info, src_role_index)
+	end)
 
 	-- Precompute ancestry flags for destination nodes (unmapped significant ancestors)
-	local dst_has_unmapped_sig_ancestor = {}
-	for id, info in pairs(dst_info) do
-		local current = info.parent
-		while current do
-			local p_id = current:id()
-			local p_info = dst_info[p_id]
-			if p_info then
-				if not dst_to_src[p_id] and is_significant(p_info, dst_role_index) then
-					dst_has_unmapped_sig_ancestor[id] = true
-					break
-				end
-				current = p_info.parent
-			else
-				break
-			end
-		end
-	end
+	local dst_has_unmapped_sig_ancestor = memoized_ancestor_flags(dst_info, function(parent_id, parent_info)
+		return not dst_to_src[parent_id] and is_significant(parent_info, dst_role_index)
+	end)
 
 	-- Precompute ancestry flags for updated significant ancestors
-	local src_has_updated_sig_ancestor = {}
-	for id, info in pairs(src_info) do
-		local current = info.parent
-		while current do
-			local p_id = current:id()
-			local p_info = src_info[p_id]
-			if p_info then
-				if
-					nodes_with_changes[p_id]
-					and is_significant(p_info, src_role_index)
-					and not is_transparent_update_ancestor(p_info, src_role_index)
-				then
-					src_has_updated_sig_ancestor[id] = true
-					break
-				end
-				current = p_info.parent
-			else
-				break
-			end
-		end
-	end
+	local src_has_updated_sig_ancestor = memoized_ancestor_flags(src_info, function(parent_id, parent_info)
+		return nodes_with_changes[parent_id]
+			and is_significant(parent_info, src_role_index)
+			and not is_transparent_update_ancestor(parent_info, src_role_index)
+	end)
 
 	-- UPDATES: mapped nodes with different content, but only significant types without updated ancestors
 	stop_timer(precompute_start, "precompute")
@@ -1017,16 +1020,24 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	-- MOVES: use LCS to find which top-level mapped functions changed relative order
 	-- Only functions not in the LCS are considered moved.
 	local moves_start = start_timer()
-	local movable_pairs = {} 
+	local movable_pairs = {}
+	local src_root_id = src_root:id()
+	local dst_root_id = dst_root:id()
 	for _, m in ipairs(mappings) do
 		local s = src_info[m.src]
 		if s and is_movable(s, src_role_index) then
-			local src_parent_is_root = s.parent and s.parent:id() == src_root:id()
+			local src_parent_is_root = (s.parent_id or (s.parent and s.parent:id()) or nil) == src_root_id
 			local d = dst_info[m.dst]
-			local dst_parent_is_root = d and d.parent and d.parent:id() == dst_root:id()
+			local dst_parent_is_root = d and ((d.parent_id or (d.parent and d.parent:id()) or nil) == dst_root_id)
 			if src_parent_is_root and dst_parent_is_root then
-				local src_line = s.node:range()
-				local dst_line = d.node:range()
+				local src_line = s.start_row
+				if src_line == nil then
+					src_line = s.node:range()
+				end
+				local dst_line = d.start_row
+				if dst_line == nil then
+					dst_line = d.node:range()
+				end
 				table.insert(movable_pairs, {
 					src_id = m.src,
 					dst_id = m.dst,
