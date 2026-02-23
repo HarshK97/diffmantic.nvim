@@ -312,7 +312,7 @@ local function summed_contained_span(actions, action_type, side_key, container_r
 	local total = 0
 	for _, action in ipairs(actions or {}) do
 		local meta = action.metadata or {}
-		if action.type == action_type then
+		if action.type == action_type and not meta.render_as_change then
 			local target = action[side_key]
 			if range_contains(container_range, target) then
 				total = total + line_span(target)
@@ -330,13 +330,13 @@ local function uncovered_update_hunk_ranges(update_action, actions, kind, side_k
 	end
 	local ranges = {}
 	for _, hunk in ipairs(hunks) do
-		if hunk.kind == kind then
+		if hunk.kind == kind and not hunk.render_as_change then
 			local target = hunk[side_key]
 			if target then
 				local covered = false
 				for _, action in ipairs(actions or {}) do
 					local meta = action.metadata or {}
-					if action.type == kind and action[side_key] then
+					if action.type == kind and not meta.render_as_change and action[side_key] then
 						if ranges_related(action[side_key], target) then
 							covered = true
 							break
