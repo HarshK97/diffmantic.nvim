@@ -1,4 +1,5 @@
 local signs = require("diffmantic.ui.signs")
+local filler = require("diffmantic.ui.filler")
 
 local M = {}
 
@@ -190,11 +191,15 @@ local function move_to_arrow(from_line, to_line)
 	return "⤴"
 end
 
-function M.render(src_buf, dst_buf, actions, ns)
+function M.render(src_buf, dst_buf, actions, ns, opts)
 	local src_sign_rows = {}
 	local dst_sign_rows = {}
 	local src_move_ranges = {}
 	local dst_move_ranges = {}
+	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf, opts)
+
+	filler.apply(src_buf, ns, src_fillers)
+	filler.apply(dst_buf, ns, dst_fillers)
 
 	for _, action in ipairs(actions) do
 		if action.type == "move" then
@@ -207,7 +212,6 @@ function M.render(src_buf, dst_buf, actions, ns)
 		end
 	end
 
-
 	for _, action in ipairs(actions) do
 		local base_style = TYPE_STYLE[action.type]
 		if base_style then
@@ -215,44 +219,45 @@ function M.render(src_buf, dst_buf, actions, ns)
 			local dst = action.dst
 			local meta = action.metadata or {}
 			local style = base_style
-			if (action.type == "insert" or action.type == "delete") and meta.render_as_change then
-				style = TYPE_STYLE.update
-			end
 
 			if action.type == "update" then
 				local effective_hunks = effective_update_hunks(action, src_buf, dst_buf)
 				if #effective_hunks == 0 then
 					goto continue
 				end
-					local rendered_hunk = false
-					for _, hunk in ipairs(effective_hunks) do
-						local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
-						if hunk.render_as_change then
-							hstyle = HUNK_STYLE.change
+				local rendered_hunk = false
+				for _, hunk in ipairs(effective_hunks) do
+					local hstyle = HUNK_STYLE[hunk.kind] or HUNK_STYLE.change
+					if hunk.render_as_change then
+						hstyle = HUNK_STYLE.change
+					end
+					if hunk.src and hstyle.src_hl then
+						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
+						if hstyle.src_hl == "DiffmanticChange" and overlaps_any(hunk.src, src_move_ranges) then
+							-- Add a foreground/underline accent so updates stay visible over moved regions.
+							apply_span(src_buf, ns, hunk.src, "DiffmanticChangeAccent")
 						end
-							if hunk.src and hstyle.src_hl then
-								apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
-								if hstyle.src_hl == "DiffmanticChange" and overlaps_any(hunk.src, src_move_ranges) then
-									-- Add a foreground/underline accent so updates stay visible over moved regions.
-									apply_span(src_buf, ns, hunk.src, "DiffmanticChangeAccent")
-								end
-								apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
-								rendered_hunk = true
-							end
-							if hunk.dst and hstyle.dst_hl then
-								apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
-								if hstyle.dst_hl == "DiffmanticChange" and overlaps_any(hunk.dst, dst_move_ranges) then
-									-- Add a foreground/underline accent so updates stay visible over moved regions.
-									apply_span(dst_buf, ns, hunk.dst, "DiffmanticChangeAccent")
-								end
-								apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
-								rendered_hunk = true
-							end
+						apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
+						rendered_hunk = true
 					end
-					if not rendered_hunk then
-						goto continue
+					if hunk.dst and hstyle.dst_hl then
+						apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
+						if hstyle.dst_hl == "DiffmanticChange" and overlaps_any(hunk.dst, dst_move_ranges) then
+							-- Add a foreground/underline accent so updates stay visible over moved regions.
+							apply_span(dst_buf, ns, hunk.dst, "DiffmanticChangeAccent")
+						end
+						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
+						rendered_hunk = true
 					end
+				end
+				if not rendered_hunk then
+					goto continue
+				end
 			else
+				if (action.type == "insert" or action.type == "delete") and meta.render_as_change then
+					-- render_as_change inserts/deletes are represented by update hunks only.
+					goto continue
+				end
 				if src then
 					apply_span(src_buf, ns, src, style.hl)
 					apply_sign(src_buf, ns, src.start_row, style.sign, style.hl, src_sign_rows)
@@ -265,23 +270,60 @@ function M.render(src_buf, dst_buf, actions, ns)
 				if action.type == "move" then
 					if src and meta.to_line then
 						local arrow = move_to_arrow(meta.from_line, meta.to_line)
-						apply_virt(src_buf, ns, src.start_row, src.end_col or 0, string.format(" %s moved to L%d", arrow, meta.to_line), "Comment", "eol")
+						apply_virt(
+							src_buf,
+							ns,
+							src.start_row,
+							src.end_col or 0,
+							string.format(" %s moved to L%d", arrow, meta.to_line),
+							"Comment",
+							"eol"
+						)
 					end
 					if dst and meta.from_line then
-						apply_virt(dst_buf, ns, dst.start_row, dst.end_col or 0, string.format(" ⤶ from L%d", meta.from_line), "Comment", "eol")
+						apply_virt(
+							dst_buf,
+							ns,
+							dst.start_row,
+							dst.end_col or 0,
+							string.format(" ⤶ from L%d", meta.from_line),
+							"Comment",
+							"eol"
+						)
 					end
 				elseif action.type == "rename" then
 					if src and meta.new_name then
-						apply_virt(src_buf, ns, src.start_row, src.end_col or 0, " -> " .. meta.new_name, "Comment", "inline")
+						apply_virt(
+							src_buf,
+							ns,
+							src.start_row,
+							src.end_col or 0,
+							" -> " .. meta.new_name,
+							"Comment",
+							"inline"
+						)
 					end
 					if dst and meta.old_name then
-						apply_virt(dst_buf, ns, dst.start_row, dst.end_col or 0, string.format(" (was %s)", meta.old_name), "Comment", "inline")
+						apply_virt(
+							dst_buf,
+							ns,
+							dst.start_row,
+							dst.end_col or 0,
+							string.format(" (was %s)", meta.old_name),
+							"Comment",
+							"inline"
+						)
 					end
 				end
 			end
 			::continue::
 		end
 	end
+
+	return {
+		src_fillers = src_fillers,
+		dst_fillers = dst_fillers,
+	}
 end
 
 return M
