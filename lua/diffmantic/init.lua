@@ -50,7 +50,11 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "DiffmanticAdd", { fg = add_sign_fg, bg = add_bg })
 	vim.api.nvim_set_hl(0, "DiffmanticDelete", { fg = delete_sign_fg, bg = delete_bg })
 	vim.api.nvim_set_hl(0, "DiffmanticChange", { fg = change_sign_fg, bg = change_bg })
-	vim.api.nvim_set_hl(0, "DiffmanticChangeAccent", { fg = change_sign_fg, bg = "NONE", underline = true, bold = true })
+	vim.api.nvim_set_hl(
+		0,
+		"DiffmanticChangeAccent",
+		{ fg = change_sign_fg, bg = "NONE", underline = true, bold = true }
+	)
 	vim.api.nvim_set_hl(0, "DiffmanticMove", { fg = move_sign_fg, bg = move_bg or "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticRename", { fg = change_sign_fg, underline = true, bold = true, italic = true })
 
@@ -63,7 +67,6 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "DiffmanticAddFiller", { fg = add_sign_fg, bg = add_bg })
 	vim.api.nvim_set_hl(0, "DiffmanticDeleteFiller", { fg = delete_sign_fg, bg = delete_bg })
 	vim.api.nvim_set_hl(0, "DiffmanticMoveFiller", { fg = move_sign_fg, bg = move_bg })
-
 end
 
 function M.setup(opts)
@@ -162,10 +165,12 @@ function M.diff(args)
 		dst_role_index = dst_role_index,
 		adaptive_mode = true,
 	})
+	vim.diagnostic.enable(false, { bufnr = buf1 })
+	vim.diagnostic.enable(false, { bufnr = buf2 })
 
 	-- debug_utils.print_actions(actions, buf1, buf2)
 	-- debug_utils.print_mappings(mappings, src_info, dst_info, buf1, buf2)
-	ui.apply_highlights(buf1, buf2, actions)
+	ui.apply_highlights(buf1, buf2, actions, { mappings = mappings, src_info = src_info, dst_info = dst_info })
 
 	vim.api.nvim_win_set_cursor(win1, { 1, 0 })
 	vim.api.nvim_win_set_cursor(win2, { 1, 0 })
