@@ -400,6 +400,44 @@ local function merge_adjacent_hunks(hunks, src_buf, dst_buf)
 	return merged
 end
 
+local function refine_single_line_change_hunks(hunks, src_buf, dst_buf)
+	if not hunks or #hunks == 0 then
+		return hunks or {}
+	end
+	for _, hunk in ipairs(hunks) do
+		if
+			hunk.kind == "change"
+			and hunk.src
+			and hunk.dst
+			and hunk.src.start_row == hunk.src.end_row
+			and hunk.dst.start_row == hunk.dst.end_row
+		then
+			local src_text = text_for_range(src_buf, hunk.src)
+			local dst_text = text_for_range(dst_buf, hunk.dst)
+			if src_text and dst_text and src_text ~= dst_text then
+				local fragment = semantic.diff_fragment(src_text, dst_text)
+				if fragment then
+					local refined_src = make_range(
+						hunk.src.start_row,
+						hunk.src.start_col + math.max(fragment.old_start - 1, 0),
+						hunk.src.start_col + math.max(fragment.old_end, 0)
+					)
+					local refined_dst = make_range(
+						hunk.dst.start_row,
+						hunk.dst.start_col + math.max(fragment.new_start - 1, 0),
+						hunk.dst.start_col + math.max(fragment.new_end, 0)
+					)
+					if refined_src and refined_dst then
+						hunk.src = refined_src
+						hunk.dst = refined_dst
+					end
+				end
+			end
+		end
+	end
+	return hunks
+end
+
 local function fallback_hunks_from_diff(src_node, dst_node, src_buf, dst_buf, rename_pairs)
 	local src_text = vim.treesitter.get_node_text(src_node, src_buf)
 	local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
@@ -645,6 +683,8 @@ function M.enrich(actions, opts)
 			end
 
 			hunks = merge_adjacent_hunks(hunks, src_buf, dst_buf)
+			hunks = refine_single_line_change_hunks(hunks, src_buf, dst_buf)
+			hunks = collapse_identical_insert_delete_hunks(hunks, src_buf, dst_buf)
 
 			action.analysis = {
 				leaf_changes = normalized_leaf,
