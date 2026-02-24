@@ -438,6 +438,54 @@ local function refine_single_line_change_hunks(hunks, src_buf, dst_buf)
 	return hunks
 end
 
+local function collapse_identical_insert_delete_hunks(hunks, src_buf, dst_buf)
+	if not hunks or #hunks == 0 then
+		return hunks or {}
+	end
+
+	local deletes_by_text = {}
+	local inserts_by_text = {}
+	for idx, hunk in ipairs(hunks) do
+		if hunk.kind == "delete" and hunk.src and hunk.src.start_row == hunk.src.end_row then
+			local text = text_for_range(src_buf, hunk.src)
+			if text and text ~= "" then
+				deletes_by_text[text] = deletes_by_text[text] or {}
+				table.insert(deletes_by_text[text], idx)
+			end
+		elseif hunk.kind == "insert" and hunk.dst and hunk.dst.start_row == hunk.dst.end_row then
+			local text = text_for_range(dst_buf, hunk.dst)
+			if text and text ~= "" then
+				inserts_by_text[text] = inserts_by_text[text] or {}
+				table.insert(inserts_by_text[text], idx)
+			end
+		end
+	end
+
+	local drop = {}
+	for text, delete_idxs in pairs(deletes_by_text) do
+		local insert_idxs = inserts_by_text[text]
+		if insert_idxs and #insert_idxs > 0 then
+			local pair_count = math.min(#delete_idxs, #insert_idxs)
+			for i = 1, pair_count do
+				drop[delete_idxs[i]] = true
+				drop[insert_idxs[i]] = true
+			end
+		end
+	end
+
+	if next(drop) == nil then
+		return hunks
+	end
+
+	local filtered = {}
+	for idx, hunk in ipairs(hunks) do
+		if not drop[idx] then
+			table.insert(filtered, hunk)
+		end
+	end
+	return filtered
+end
+
 local function fallback_hunks_from_diff(src_node, dst_node, src_buf, dst_buf, rename_pairs)
 	local src_text = vim.treesitter.get_node_text(src_node, src_buf)
 	local dst_text = vim.treesitter.get_node_text(dst_node, dst_buf)
