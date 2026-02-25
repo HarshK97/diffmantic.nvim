@@ -10,10 +10,10 @@ function M.clear_highlights(bufnr)
 	end
 end
 
-function M.apply_highlights(src_buf, dst_buf, actions)
+function M.apply_highlights(src_buf, dst_buf, actions, opts)
 	M.clear_highlights(src_buf)
 	M.clear_highlights(dst_buf)
-	renderer.render(src_buf, dst_buf, actions, ns)
+	return renderer.render(src_buf, dst_buf, actions, ns, opts)
 end
 
 return M

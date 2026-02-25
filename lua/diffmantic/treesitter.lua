@@ -10,6 +10,10 @@ local function string_hash(str)
 	return h
 end
 
+local function hash_combine(acc, value)
+	return ((acc * 33) + value + 97) % 4294967296
+end
+
 -- A leaf node has no children (e.g., a variable name, number, string literal)
 local function is_leaf(node)
 	return node:named_child_count() == 0
@@ -27,34 +31,54 @@ end
 
 -- Walk through the entire syntax tree and compute metadata for each node
 -- Returns a table mapping node IDs to their computed info
-function M.preprocess_tree(root, bufnr)
+function M.preprocess_tree(root, bufnr, opts)
+	opts = opts or {}
 	local info = {}
+	local label_hash_cache = {}
+	local type_hash_cache = {}
+
+	local function cached_string_hash(cache, text)
+		local value = cache[text]
+		if value == nil then
+			value = string_hash(text)
+			cache[text] = value
+		end
+		return value
+	end
 
 	local function visit(node)
 		local id = node:id()
 		local type = node:type()
 		local label = get_label(node, bufnr)
+		local sr, sc, er, ec = node:range()
 
 		local height = 1
 		local size = 1
-		local child_hashes = ""
-		local child_structure_hashes = ""
+		local hash_acc = cached_string_hash(type_hash_cache, type)
+		local structure_hash_acc = hash_acc
 
 		-- Recursively process all children first (post-order traversal)
 		for child in node:iter_children() do
 			local child_info = visit(child)
 			height = math.max(height, child_info.height + 1)
 			size = size + child_info.size
-			child_hashes = child_hashes .. tostring(child_info.hash)
-			child_structure_hashes = child_structure_hashes .. tostring(child_info.structure_hash)
-			info[child:id()].parent = node
+			hash_acc = hash_combine(hash_acc, child_info.hash)
+			structure_hash_acc = hash_combine(structure_hash_acc, child_info.structure_hash)
+			child_info.parent = node
+			child_info.parent_id = id
+		end
+
+		if label ~= "" then
+			hash_acc = hash_combine(hash_acc, cached_string_hash(label_hash_cache, label))
+		else
+			hash_acc = hash_combine(hash_acc, 0)
 		end
 
 		-- hash: unique if type + label + children all match (exact match)
-		local hash = string_hash(type .. label .. child_hashes)
+		local hash = hash_acc
 		-- structure_hash: unique if type + children structure match (ignores labels)
 		-- useful for detecting moved/renamed code
-		local structure_hash = string_hash(type .. child_structure_hashes)
+		local structure_hash = structure_hash_acc
 
 		info[id] = {
 			node = node,
@@ -65,6 +89,11 @@ function M.preprocess_tree(root, bufnr)
 			type = type,
 			label = label,
 			id = id,
+			start_row = sr,
+			start_col = sc,
+			end_row = er,
+			end_col = ec,
+			parent_id = nil,
 		}
 		return info[id]
 	end
