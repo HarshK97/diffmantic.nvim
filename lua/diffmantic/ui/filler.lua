@@ -1,4 +1,5 @@
 local M = {}
+local hunk_utils = require("diffmantic.ui.hunks")
 local VIRT_LINE_LEN = 300
 local HL_ADD = "DiffmanticAddFiller"
 local HL_DELETE = "DiffmanticDeleteFiller"
@@ -322,10 +323,15 @@ local function summed_contained_span(actions, action_type, side_key, container_r
 	return total
 end
 
-local function uncovered_update_hunk_ranges(update_action, actions, kind, side_key)
+local function uncovered_update_hunk_ranges(update_action, actions, kind, side_key, src_buf, dst_buf)
 	local analysis = update_action and update_action.analysis or nil
 	local hunks = analysis and analysis.hunks or nil
 	if not hunks or #hunks == 0 then
+		return {}
+	end
+	hunks = hunk_utils.normalize_list(hunks, src_buf, dst_buf)
+	analysis.hunks = hunks
+	if #hunks == 0 then
 		return {}
 	end
 	local ranges = {}
@@ -733,6 +739,9 @@ function M.compute(actions, src_buf, dst_buf, opts)
 	local projection_contexts = build_projection_contexts(actions, opts.mappings, opts.src_info, opts.dst_info)
 
 	for _, action in ipairs(actions or {}) do
+		if action.type == "update" and action.analysis and action.analysis.hunks then
+			action.analysis.hunks = hunk_utils.normalize_list(action.analysis.hunks, src_buf, dst_buf)
+		end
 		if action.type == "move" and action.src and action.dst then
 			table.insert(moves, action)
 			table.insert(src_move_events, action)
@@ -868,9 +877,9 @@ function M.compute(actions, src_buf, dst_buf, opts)
 			local src_lines = line_span(src)
 			local dst_lines = line_span(dst)
 			local uncovered_delete =
-				merge_adjacent_ranges(uncovered_update_hunk_ranges(action, actions, "delete", "src"))
+				merge_adjacent_ranges(uncovered_update_hunk_ranges(action, actions, "delete", "src", src_buf, dst_buf))
 			local uncovered_insert =
-				merge_adjacent_ranges(uncovered_update_hunk_ranges(action, actions, "insert", "dst"))
+				merge_adjacent_ranges(uncovered_update_hunk_ranges(action, actions, "insert", "dst", src_buf, dst_buf))
 			local uncovered_delete_span = 0
 			local uncovered_insert_span = 0
 

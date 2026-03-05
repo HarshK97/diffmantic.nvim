@@ -1,5 +1,6 @@
 local signs = require("diffmantic.ui.signs")
 local filler = require("diffmantic.ui.filler")
+local hunk_utils = require("diffmantic.ui.hunks")
 
 local M = {}
 
@@ -79,6 +80,19 @@ local function overlaps_any(range, ranges)
 		end
 	end
 	return false
+end
+
+local function collect_explicit_edit_ranges(actions)
+	local src_delete = {}
+	local dst_insert = {}
+	for _, action in ipairs(actions or {}) do
+		if action.type == "insert" and action.dst then
+			table.insert(dst_insert, action.dst)
+		elseif action.type == "delete" and action.src then
+			table.insert(src_delete, action.src)
+		end
+	end
+	return src_delete, dst_insert
 end
 
 local function apply_virt(buf, ns, row, col, text, hl_group, pos)
@@ -171,9 +185,14 @@ local function effective_update_hunks(action, src_buf, dst_buf)
 	if not hunks or #hunks == 0 then
 		return {}
 	end
+	local normalized = hunk_utils.normalize_list(hunks, src_buf, dst_buf)
+	analysis.hunks = normalized
+	if #normalized == 0 then
+		return {}
+	end
 	local rename_pairs = analysis.rename_pairs or {}
 	local effective = {}
-	for _, hunk in ipairs(hunks) do
+	for _, hunk in ipairs(normalized) do
 		if hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf) then
 			table.insert(effective, hunk)
 		end
@@ -196,6 +215,7 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 	local dst_sign_rows = {}
 	local src_move_ranges = {}
 	local dst_move_ranges = {}
+	local src_delete_ranges, dst_insert_ranges = collect_explicit_edit_ranges(actions)
 	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf, opts)
 
 	filler.apply(src_buf, ns, src_fillers)
@@ -231,6 +251,12 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 					if hunk.render_as_change then
 						hstyle = HUNK_STYLE.change
 					end
+					if hunk.kind == "insert" and hunk.dst and overlaps_any(hunk.dst, dst_insert_ranges) then
+						goto continue_hunk
+					end
+					if hunk.kind == "delete" and hunk.src and overlaps_any(hunk.src, src_delete_ranges) then
+						goto continue_hunk
+					end
 					if hunk.src and hstyle.src_hl then
 						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
 						if hstyle.src_hl == "DiffmanticChange" and overlaps_any(hunk.src, src_move_ranges) then
@@ -249,6 +275,7 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
 						rendered_hunk = true
 					end
+					::continue_hunk::
 				end
 				if not rendered_hunk then
 					goto continue

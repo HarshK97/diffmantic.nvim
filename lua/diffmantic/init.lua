@@ -129,42 +129,16 @@ function M.diff(args)
 	local src_role_index = roles.build_index(root1, buf1)
 	local dst_role_index = roles.build_index(root2, buf2)
 
-	local mappings, src_info, dst_info = core.top_down_match(root1, root2, buf1, buf2, {
-		adaptive_mode = true,
-	})
-	-- print("Top-down mappings: " .. #mappings)
-
-	-- local before_bottom_up = #mappings
-	mappings = core.bottom_up_match(mappings, src_info, dst_info, root1, root2, buf1, buf2, {
-		src_role_index = src_role_index,
-		dst_role_index = dst_role_index,
-		adaptive_mode = true,
-	})
-	-- print("Mappings after Bottom-up: " .. #mappings .. " (+" .. (#mappings - before_bottom_up) .. " new)")
-
-	-- local before_recovery = #mappings
-	local src_count = 0
-	local dst_count = 0
-	for _ in pairs(src_info) do
-		src_count = src_count + 1
-	end
-	for _ in pairs(dst_info) do
-		dst_count = dst_count + 1
-	end
-	local max_nodes = math.max(src_count, dst_count)
-	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2, {
-		recovery_lcs_cell_limit = max_nodes >= 25000 and 1500 or 6000,
-		adaptive_mode = true,
-	})
-	-- debug_utils.print_recovery_mappings(mappings, before_recovery, src_info, dst_info, buf1, buf2)
-
-	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info, {
+	local result = core.diff(root1, root2, {
 		src_buf = buf1,
 		dst_buf = buf2,
 		src_role_index = src_role_index,
 		dst_role_index = dst_role_index,
-		adaptive_mode = true,
 	})
+	local actions = result.actions or {}
+	local mappings = result.mappings or {}
+	local src_info = result.src_info or {}
+	local dst_info = result.dst_info or {}
 	vim.diagnostic.enable(false, { bufnr = buf1 })
 	vim.diagnostic.enable(false, { bufnr = buf2 })
 
