@@ -303,6 +303,12 @@ local function prematch_functions(src_info, dst_info, s2d, d2s, out)
 		if a.score ~= b.score then
 			return a.score > b.score
 		end
+		if a.size == b.size then
+			if a.sid == b.sid then
+				return node_pos_lt(a.did, b.did, dst_info)
+			end
+			return node_pos_lt(a.sid, b.sid, src_info)
+		end
 		return a.size > b.size
 	end)
 
@@ -331,8 +337,11 @@ local function build_height_queue(info)
 		end
 	end
 	local heights = {}
-	for h in pairs(by_height) do
+	for h, ids in pairs(by_height) do
 		table.insert(heights, h)
+		table.sort(ids, function(a, b)
+			return node_pos_lt(a, b, info)
+		end)
 	end
 	table.sort(heights, function(a, b)
 		return a > b
@@ -381,16 +390,14 @@ function M.top_down_match(_src_root, _dst_root, _src_buf, _dst_buf, src_info, ds
 	local src_open = {}
 	local dst_open = {}
 
-	for _, ids in pairs(src_by_h) do
-		for _, id in ipairs(ids) do
-			local h = src_info[id].height
+	for _, h in ipairs(src_heights) do
+		for _, id in ipairs(src_by_h[h]) do
 			src_open[h] = src_open[h] or {}
 			table.insert(src_open[h], id)
 		end
 	end
-	for _, ids in pairs(dst_by_h) do
-		for _, id in ipairs(ids) do
-			local h = dst_info[id].height
+	for _, h in ipairs(dst_heights) do
+		for _, id in ipairs(dst_by_h[h]) do
 			dst_open[h] = dst_open[h] or {}
 			table.insert(dst_open[h], id)
 		end
@@ -531,6 +538,11 @@ function M.top_down_match(_src_root, _dst_root, _src_buf, _dst_buf, src_info, ds
 		for _, id in ipairs(b.srcs) do
 			sb = math.max(sb, src_info[id].size or 0)
 		end
+		if sa == sb then
+			if a.srcs[1] and b.srcs[1] then
+				return node_pos_lt(a.srcs[1], b.srcs[1], src_info)
+			end
+		end
 		return sa > sb
 	end)
 
@@ -542,6 +554,12 @@ function M.top_down_match(_src_root, _dst_root, _src_buf, _dst_buf, src_info, ds
 			end
 		end
 		table.sort(pairs_list, function(a, b)
+			if a.size == b.size then
+				if a.sid == b.sid then
+					return node_pos_lt(a.did, b.did, dst_info)
+				end
+				return node_pos_lt(a.sid, b.sid, src_info)
+			end
 			return a.size > b.size
 		end)
 

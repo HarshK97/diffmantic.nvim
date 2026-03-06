@@ -9,6 +9,40 @@ local ts             = require("diffmantic.treesitter")
 
 local M = {}
 
+local function node_sort_key(info, id)
+	local e = info and info[id] or nil
+	if not e then
+		return "nil|-1|-1|-1|-1|-1|-1||"
+	end
+	return table.concat({
+		tostring(e.start_byte or -1),
+		tostring(e.end_byte or -1),
+		tostring(e.start_row or -1),
+		tostring(e.start_col or -1),
+		tostring(e.end_row or -1),
+		tostring(e.end_col or -1),
+		tostring(e.type or ""),
+		tostring(e.label or ""),
+	}, "|")
+end
+
+local function sort_mappings(mappings, src_info, dst_info)
+	if not mappings or #mappings < 2 then
+		return mappings
+	end
+	table.sort(mappings, function(a, b)
+		local as = node_sort_key(src_info, a.src)
+		local bs = node_sort_key(src_info, b.src)
+		if as ~= bs then
+			return as < bs
+		end
+		local ad = node_sort_key(dst_info, a.dst)
+		local bd = node_sort_key(dst_info, b.dst)
+		return ad < bd
+	end)
+	return mappings
+end
+
 function M.pre_match(src_root, dst_root, src_buf, dst_buf, src_info_or_opts, dst_info, opts)
 	local src_info
 	if dst_info ~= nil or opts ~= nil then
@@ -22,7 +56,8 @@ function M.pre_match(src_root, dst_root, src_buf, dst_buf, src_info_or_opts, dst
 
 	src_info = src_info or ts.preprocess_tree(src_root, src_buf, opts)
 	dst_info = dst_info or ts.preprocess_tree(dst_root, dst_buf, opts)
-	return prematch_mod.prematch_unchanged(src_info, dst_info, src_buf, dst_buf)
+	local mappings = prematch_mod.prematch_unchanged(src_info, dst_info, src_buf, dst_buf)
+	return sort_mappings(mappings, src_info, dst_info)
 end
 
 function M.top_down_match(src_root, dst_root, src_buf, dst_buf, opts)
@@ -38,6 +73,7 @@ function M.top_down_match(src_root, dst_root, src_buf, dst_buf, opts)
 		opts.existing_mappings,
 		opts
 	)
+	sort_mappings(mappings, src_info, dst_info)
 	return mappings, src_info, dst_info
 end
 
@@ -119,6 +155,7 @@ function M.diff(src_root, dst_root, src_buf_or_opts, dst_buf, opts)
 		src_buf,  dst_buf,
 		opts
 	)
+	sort_mappings(mappings, src_info, dst_info)
 
 	local acts = M.generate_actions(
 		src_root, dst_root,
@@ -127,7 +164,12 @@ function M.diff(src_root, dst_root, src_buf_or_opts, dst_buf, opts)
 	)
 
 	if use_table_return then
-		return { actions = acts, src_info = src_info, dst_info = dst_info, mappings = mappings }
+		return {
+			actions = acts,
+			src_info = src_info,
+			dst_info = dst_info,
+			mappings = mappings,
+		}
 	end
 	return acts, src_info, dst_info, mappings
 end

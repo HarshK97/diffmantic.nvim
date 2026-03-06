@@ -29,6 +29,16 @@ local function nodes_by_line(info)
 			table.insert(by_line[line], id)
 		end
 	end
+	for _, ids in pairs(by_line) do
+		table.sort(ids, function(a, b)
+			local ca = info[a].start_col or 0
+			local cb = info[b].start_col or 0
+			if ca == cb then
+				return tostring(a) < tostring(b)
+			end
+			return ca < cb
+		end)
+	end
 	return by_line
 end
 
@@ -81,7 +91,14 @@ function M.prematch_unchanged(src_info, dst_info, src_buf, dst_buf)
 	local s2d = {}
 	local d2s = {}
 
-	for src_line, dst_line in pairs(line_map) do
+	local sorted_lines = {}
+	for src_line in pairs(line_map) do
+		table.insert(sorted_lines, src_line)
+	end
+	table.sort(sorted_lines)
+
+	for _, src_line in ipairs(sorted_lines) do
+		local dst_line = line_map[src_line]
 		local src_nodes = src_by_line[src_line] or {}
 		local dst_nodes = dst_by_line[dst_line] or {}
 
