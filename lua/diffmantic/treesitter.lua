@@ -58,6 +58,7 @@ function M.preprocess_tree(root, bufnr, opts)
 
 		local hash_type = rules_mod.canonical_type(rules, type_, parent_type)
 		local sr, sc, er, ec = node:range()
+		local _, _, sb, _, _, eb = node:range(true)
 
 		if rules_mod.is_flattened(rules, type_, parent_type) then
 			local full_text = ""
@@ -77,6 +78,8 @@ function M.preprocess_tree(root, bufnr, opts)
 				id        = id,
 				start_row = sr, start_col = sc,
 				end_row   = er, end_col   = ec,
+				start_byte = sb,
+				end_byte   = eb,
 				parent_id = parent_id,
 			}
 			if parent_id then
@@ -120,6 +123,8 @@ function M.preprocess_tree(root, bufnr, opts)
 			id             = id,
 			start_row      = sr, start_col = sc,
 			end_row        = er, end_col   = ec,
+			start_byte     = sb,
+			end_byte       = eb,
 			parent_id      = parent_id,
 		}
 		return info[id]
