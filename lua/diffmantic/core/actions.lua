@@ -90,6 +90,33 @@ local function effective_label(info_entry, buf)
 	return ""
 end
 
+local function node_text(node, buf)
+	if not node or not buf then
+		return ""
+	end
+	local ok, txt = pcall(vim.treesitter.get_node_text, node, buf)
+	if not ok or not txt then
+		return ""
+	end
+	return vim.trim(txt)
+end
+
+local function pair_key_text(node, buf)
+	if not node then
+		return ""
+	end
+	for child in node:iter_children() do
+		local ok_named, is_named = pcall(child.named, child)
+		if ok_named and is_named then
+			local txt = node_text(child, buf)
+			if txt ~= "" then
+				return txt
+			end
+		end
+	end
+	return ""
+end
+
 local function is_leaf_info(info_entry)
 	if not info_entry then
 		return false
@@ -135,6 +162,19 @@ local function nearest_function_container(id, info)
 		cur = p
 	end
 	return nil
+end
+
+local function should_emit_named_leaf_edit(info_entry)
+	if not info_entry or not info_entry.node then
+		return false
+	end
+	if (info_entry.size or 0) > 1 then
+		return false
+	end
+	if not info_entry.node:named() then
+		return false
+	end
+	return true
 end
 
 local function range_contains(outer, inner)
@@ -261,7 +301,7 @@ local function has_stable_mapped_neighbors(sid, did, src_info, dst_info, s2d, d2
 	return prev_ok and next_ok
 end
 
-local function lis_membership(seq)
+local function lis_membership(seq, displacement)
 	local n = #seq
 	if n == 0 then return {} end
 
@@ -283,12 +323,228 @@ local function lis_membership(seq)
 	local prev_val = math.huge
 	for i = n, 1, -1 do
 		if dp[i] == cur and seq[i] < prev_val then
+			if displacement then
+				local best_j = i
+				for j = i - 1, 1, -1 do
+					if dp[j] == cur and seq[j] < prev_val and seq[j] <= seq[best_j] then
+						if (displacement[j] or 0) < (displacement[best_j] or 0) then
+							best_j = j
+						end
+					end
+				end
+				if best_j ~= i and dp[best_j] == cur and seq[best_j] < prev_val then
+					in_lis[best_j] = true
+					prev_val = seq[best_j]
+					cur = cur - 1
+					goto continue_lis
+				end
+			end
 			in_lis[i] = true
 			prev_val = seq[i]
 			cur = cur - 1
 		end
+		::continue_lis::
 	end
 	return in_lis
+end
+
+local function collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d, src_buf, dst_buf)
+	local delete_idxs = {}
+	local insert_idxs = {}
+	for i, action in ipairs(actions) do
+		if action.type == "delete" and action.src_node then
+			local sid = action.src_node:id()
+			local si = src_info[sid]
+			if si and si.type == "shorthand_property_identifier" then
+				table.insert(delete_idxs, i)
+			end
+		elseif action.type == "insert" and action.dst_node then
+			local did = action.dst_node:id()
+			local di = dst_info[did]
+			if di and di.type == "pair" then
+				table.insert(insert_idxs, i)
+			end
+		end
+	end
+
+	if #delete_idxs == 0 or #insert_idxs == 0 then
+		return actions
+	end
+
+	local used_insert = {}
+	local drop = {}
+	local appended = {}
+
+	for _, del_idx in ipairs(delete_idxs) do
+		local del_action = actions[del_idx]
+		local sid = del_action.src_node and del_action.src_node:id() or nil
+		local si = sid and src_info[sid] or nil
+		if not si then
+			goto continue_delete
+		end
+
+		local src_key = node_text(del_action.src_node, src_buf)
+		if src_key == "" then
+			goto continue_delete
+		end
+		local mapped_parent = si.parent_id and s2d[si.parent_id] or nil
+
+		local best_idx = nil
+		local best_dist = nil
+		for _, ins_idx in ipairs(insert_idxs) do
+			if used_insert[ins_idx] then
+				goto continue_insert
+			end
+
+			local ins_action = actions[ins_idx]
+			local did = ins_action.dst_node and ins_action.dst_node:id() or nil
+			local di = did and dst_info[did] or nil
+			if not di then
+				goto continue_insert
+			end
+			if mapped_parent and di.parent_id ~= mapped_parent then
+				goto continue_insert
+			end
+
+			local dst_key = pair_key_text(ins_action.dst_node, dst_buf)
+			if dst_key ~= src_key then
+				goto continue_insert
+			end
+
+			local srow = del_action.src and del_action.src.start_row or 0
+			local drow = ins_action.dst and ins_action.dst.start_row or 0
+			local dist = math.abs(srow - drow)
+			if not best_idx or dist < best_dist then
+				best_idx = ins_idx
+				best_dist = dist
+			end
+
+			::continue_insert::
+		end
+
+		if best_idx then
+			local ins_action = actions[best_idx]
+			local did = ins_action.dst_node and ins_action.dst_node:id() or nil
+			local di = did and dst_info[did] or nil
+
+			used_insert[best_idx] = true
+			drop[del_idx] = true
+			drop[best_idx] = true
+
+			table.insert(appended, {
+				type = "update",
+				src = del_action.src,
+				dst = ins_action.dst,
+				src_node = del_action.src_node,
+				dst_node = ins_action.dst_node,
+				metadata = {
+					node_type = "pair",
+					old_name = node_label(si, src_buf),
+					new_name = node_label(di, dst_buf),
+					from_line = (del_action.src and (del_action.src.start_row + 1))
+						or (del_action.metadata and del_action.metadata.from_line)
+						or nil,
+					to_line = (ins_action.dst and (ins_action.dst.start_row + 1))
+						or (ins_action.metadata and ins_action.metadata.from_line)
+						or nil,
+				},
+			})
+		end
+
+		::continue_delete::
+	end
+
+	if next(drop) == nil then
+		return actions
+	end
+
+	local filtered = {}
+	for i, action in ipairs(actions) do
+		if not drop[i] then
+			table.insert(filtered, action)
+		end
+	end
+	for _, action in ipairs(appended) do
+		table.insert(filtered, action)
+	end
+
+	return filtered
+end
+
+local function build_children_index(info)
+	local out = {}
+	for id, entry in pairs(info or {}) do
+		local pid = entry.parent_id
+		if pid then
+			out[pid] = out[pid] or {}
+			table.insert(out[pid], id)
+		end
+	end
+	return out
+end
+
+local function descendants_fully_mapped(root_id, info, peer_map, children_by_parent)
+	local children = children_by_parent[root_id]
+	if not children or #children == 0 then
+		return false
+	end
+
+	local stack = {}
+	for _, cid in ipairs(children) do
+		table.insert(stack, cid)
+	end
+
+	local named_count = 0
+	local named_mapped = 0
+	while #stack > 0 do
+		local id = table.remove(stack)
+		local entry = info[id]
+		if entry and entry.node and entry.node:named() then
+			named_count = named_count + 1
+			if peer_map[id] then
+				named_mapped = named_mapped + 1
+			end
+		end
+		for _, cid in ipairs(children_by_parent[id] or {}) do
+			table.insert(stack, cid)
+		end
+	end
+
+	return named_count > 0 and named_mapped == named_count and named_mapped > 0
+end
+
+local function collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
+	local src_children = build_children_index(src_info)
+	local dst_children = build_children_index(dst_info)
+	local drop = {}
+
+	for i, action in ipairs(actions) do
+		if action.type == "insert" and action.dst_node then
+			local did = action.dst_node:id()
+			local di = dst_info[did]
+			if di and di.type == "field" and descendants_fully_mapped(did, dst_info, d2s, dst_children) then
+				drop[i] = true
+			end
+		elseif action.type == "delete" and action.src_node then
+			local sid = action.src_node:id()
+			local si = src_info[sid]
+			if si and si.type == "field" and descendants_fully_mapped(sid, src_info, s2d, src_children) then
+				drop[i] = true
+			end
+		end
+	end
+
+	if next(drop) == nil then
+		return actions
+	end
+
+	local filtered = {}
+	for i, action in ipairs(actions) do
+		if not drop[i] then
+			table.insert(filtered, action)
+		end
+	end
+	return filtered
 end
 
 
@@ -310,7 +566,8 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if not di then goto cont_ins end
 		local parent_did = di.parent_id
 		local dst_size = di.size or 1
-		if (not parent_did or d2s[parent_did]) and dst_size > 1 then
+		local size_ok = dst_size > 1 or should_emit_named_leaf_edit(di)
+		if (not parent_did or d2s[parent_did]) and size_ok then
 			local emit_info = di
 			if di.type == "expression_statement" and di.node then
 				local children = {}
@@ -442,6 +699,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if si and di then
 			if not should_emit_move_type(si.type) then goto cont_mv end
 			if si.node and not si.node:named() then goto cont_mv end
+			if is_top_level_like(sid, src_info, src_root_id) and is_top_level_like(did, dst_info, dst_root_id) then
+				goto cont_mv
+			end
 			local src_range = node_range(si.node)
 			local dst_range = node_range(di.node)
 			table.insert(actions, {
@@ -548,54 +808,96 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			moved_src[action.src_node:id()] = true
 		end
 	end
-	local TOP_LEVEL_MOVE_TYPES = {
-		function_definition = true,
-		function_declaration = true,  -- Lua uses this for `local function`
-		struct_specifier = true,
-		class_specifier = true,
-		enum_specifier = true,
-		class_declaration = true,
-		interface_declaration = true,
-		type_declaration = true,
-	}
-	for _, m in ipairs(mappings) do
-		local sid = m.src
-		local did = m.dst
-		if sid ~= src_root_id and not moved_src[sid] then
-			local si = src_info[sid]
-			local di = dst_info[did]
-			if si and di and TOP_LEVEL_MOVE_TYPES[si.type] and si.type == di.type then
-				local src_top = is_top_level_like(sid, src_info, src_root_id)
-				local dst_top = is_top_level_like(did, dst_info, dst_root_id)
-				local old_name = node_label(si, src_buf)
-				local new_name = node_label(di, dst_buf)
-				if src_top and dst_top then
-					local has_body = (old_name:find("{", 1, true) and new_name:find("{", 1, true))
-						or si.type == "function_declaration"   -- Lua
-						or si.type == "function_definition"    -- Python (also C/Go/JS but { already matches)
-					if has_body then
-						local src_range = node_range(si.node)
-						local dst_range = node_range(di.node)
-						if src_range and dst_range and src_range.start_row ~= dst_range.start_row then
-							table.insert(actions, {
-								type = "move",
-								src = src_range,
-								dst = dst_range,
-								src_node = si.node,
-								dst_node = di.node,
-								metadata = {
-									node_type = si.type,
-									old_name = old_name,
-									new_name = new_name,
-									from_line = src_range.start_row + 1,
-									to_line = dst_range.start_row + 1,
-								},
-							})
-							moved_src[sid] = true
+
+	do
+		local TOP_LEVEL_MOVE_TYPES = {
+			function_definition = true,
+			function_declaration = true,
+			struct_specifier = true,
+			class_specifier = true,
+			enum_specifier = true,
+			class_declaration = true,
+			interface_declaration = true,
+			type_declaration = true,
+		}
+
+		local parent_groups = {}
+		for _, m in ipairs(mappings) do
+			local sid, did = m.src, m.dst
+			if sid == src_root_id or moved_src[sid] then goto skip_tl end
+			local si, di = src_info[sid], dst_info[did]
+			if not si or not di then goto skip_tl end
+			if not TOP_LEVEL_MOVE_TYPES[si.type] or si.type ~= di.type then goto skip_tl end
+			if not is_top_level_like(sid, src_info, src_root_id) then goto skip_tl end
+			if not is_top_level_like(did, dst_info, dst_root_id) then goto skip_tl end
+
+			local src_pid = si.parent_id or src_root_id
+			local dst_pid = di.parent_id or dst_root_id
+			local key = src_pid .. ":" .. dst_pid
+			if not parent_groups[key] then
+				parent_groups[key] = { src_pid = src_pid, dst_pid = dst_pid, items = {} }
+			end
+			table.insert(parent_groups[key].items, { sid = sid, did = did })
+			::skip_tl::
+		end
+
+		for _, group in pairs(parent_groups) do
+			local items = group.items
+			if #items < 2 then goto next_group end
+
+			local src_pos = child_positions(group.src_pid, src_info)
+			local dst_pos = child_positions(group.dst_pid, dst_info)
+
+			table.sort(items, function(a, b)
+				return (src_pos[a.sid] or 0) < (src_pos[b.sid] or 0)
+			end)
+
+			local dpos_seq = {}
+			local disp_seq = {}
+			for idx, item in ipairs(items) do
+				local sp = src_pos[item.sid] or 0
+				local dp = dst_pos[item.did] or 0
+				table.insert(dpos_seq, dp)
+				table.insert(disp_seq, math.abs(sp - dp))
+			end
+
+			local in_lis = lis_membership(dpos_seq, disp_seq)
+
+			for i, item in ipairs(items) do
+				if not in_lis[i] then
+					local si = src_info[item.sid]
+					local di = dst_info[item.did]
+					if si and di and si.node and si.node:named() then
+						local old_name = node_label(si, src_buf)
+						local new_name = node_label(di, dst_buf)
+						local has_body = (old_name:find("{", 1, true) and new_name:find("{", 1, true))
+							or si.type == "function_declaration"
+							or si.type == "function_definition"
+						if has_body then
+							local src_range = node_range(si.node)
+							local dst_range = node_range(di.node)
+							if src_range and dst_range then
+								table.insert(actions, {
+									type = "move",
+									src = src_range,
+									dst = dst_range,
+									src_node = si.node,
+									dst_node = di.node,
+									metadata = {
+										node_type = si.type,
+										old_name = old_name,
+										new_name = new_name,
+										from_line = src_range.start_row + 1,
+										to_line = dst_range.start_row + 1,
+									},
+								})
+								moved_src[item.sid] = true
+							end
 						end
 					end
 				end
 			end
+			::next_group::
 		end
 	end
 
@@ -661,7 +963,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if not si then goto cont_del end
 		local parent_sid = si.parent_id
 		local src_size = si.size or 1
-		local size_ok = src_size > 1 or si.type == "shorthand_property_identifier"
+		local size_ok = src_size > 1
+			or si.type == "shorthand_property_identifier"
+			or should_emit_named_leaf_edit(si)
 		if (not parent_sid or s2d[parent_sid]) and size_ok then
 			local range = node_range(si.node)
 			table.insert(actions, {
@@ -719,6 +1023,9 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		end
 		actions = filtered
 	end
+
+	actions = collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d, src_buf, dst_buf)
+	actions = collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
 
 	return actions
 end

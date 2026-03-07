@@ -1,5 +1,4 @@
 local signs = require("diffmantic.ui.signs")
-local filler = require("diffmantic.ui.filler")
 local hunk_utils = require("diffmantic.ui.hunks")
 
 local M = {}
@@ -216,10 +215,7 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 	local src_move_ranges = {}
 	local dst_move_ranges = {}
 	local src_delete_ranges, dst_insert_ranges = collect_explicit_edit_ranges(actions)
-	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf, opts)
-
-	filler.apply(src_buf, ns, src_fillers)
-	filler.apply(dst_buf, ns, dst_fillers)
+	local src_fillers, dst_fillers = {}, {}
 
 	for _, action in ipairs(actions) do
 		if action.type == "move" then
@@ -260,7 +256,6 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 					if hunk.src and hstyle.src_hl then
 						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
 						if hstyle.src_hl == "DiffmanticChange" and overlaps_any(hunk.src, src_move_ranges) then
-							-- Add a foreground/underline accent so updates stay visible over moved regions.
 							apply_span(src_buf, ns, hunk.src, "DiffmanticChangeAccent")
 						end
 						apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
@@ -269,7 +264,6 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 					if hunk.dst and hstyle.dst_hl then
 						apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
 						if hstyle.dst_hl == "DiffmanticChange" and overlaps_any(hunk.dst, dst_move_ranges) then
-							-- Add a foreground/underline accent so updates stay visible over moved regions.
 							apply_span(dst_buf, ns, hunk.dst, "DiffmanticChangeAccent")
 						end
 						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
@@ -282,7 +276,6 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 				end
 			else
 				if (action.type == "insert" or action.type == "delete") and meta.render_as_change then
-					-- render_as_change inserts/deletes are represented by update hunks only.
 					goto continue
 				end
 				if src then

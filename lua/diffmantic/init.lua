@@ -38,7 +38,6 @@ local function setup_highlights()
 	local change_bg = pick_bg({ "DiffText", "DiffChange" })
 	local move_bg = pick_bg({ "DiffChange", "DiffText" })
 	if move_bg == change_bg then
-		-- If move and change resolve to the same background, de-emphasize move fill so updates remain visible.
 		move_bg = nil
 	end
 
@@ -63,10 +62,6 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "DiffmanticChangeSign", { fg = change_sign_fg, bg = "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticMoveSign", { fg = move_sign_fg, bg = "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticRenameSign", { fg = change_sign_fg, bg = "NONE" })
-
-	vim.api.nvim_set_hl(0, "DiffmanticAddFiller", { fg = add_sign_fg, bg = add_bg })
-	vim.api.nvim_set_hl(0, "DiffmanticDeleteFiller", { fg = delete_sign_fg, bg = delete_bg })
-	vim.api.nvim_set_hl(0, "DiffmanticMoveFiller", { fg = move_sign_fg, bg = move_bg })
 end
 
 function M.setup(opts)
@@ -92,7 +87,6 @@ function M.diff(args)
 	local win1, win2
 
 	if file2 then
-		-- Case: 2 files provided. Open them in split.
 		vim.cmd("tabnew")
 		vim.cmd("edit " .. file1)
 		buf1 = vim.api.nvim_get_current_buf()
@@ -102,7 +96,6 @@ function M.diff(args)
 		buf2 = vim.api.nvim_get_current_buf()
 		win2 = vim.api.nvim_get_current_win()
 	else
-		-- Case: 1 file provided. Compare current buffer vs file.
 		buf1 = vim.api.nvim_get_current_buf()
 		win1 = vim.api.nvim_get_current_win()
 		local expanded_path = vim.fn.expand(file1)
@@ -142,9 +135,11 @@ function M.diff(args)
 	vim.diagnostic.enable(false, { bufnr = buf1 })
 	vim.diagnostic.enable(false, { bufnr = buf2 })
 
-	-- debug_utils.print_actions(actions, buf1, buf2)
-	-- debug_utils.print_mappings(mappings, src_info, dst_info, buf1, buf2)
-	ui.apply_highlights(buf1, buf2, actions, { mappings = mappings, src_info = src_info, dst_info = dst_info })
+	ui.apply_highlights(buf1, buf2, actions, {
+		mappings = mappings,
+		src_info = src_info,
+		dst_info = dst_info,
+	})
 
 	vim.api.nvim_win_set_cursor(win1, { 1, 0 })
 	vim.api.nvim_win_set_cursor(win2, { 1, 0 })
