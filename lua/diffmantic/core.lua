@@ -1,8 +1,12 @@
 
+-- Inspired by: GumTree-style multi-phase AST source differencing.
+-- Reference: https://hal.science/hal-04855170v1/file/GumTree_simple__fine_grained__accurate_and_scalable_source_differencing.pdf
+
 local top_down_mod   = require("diffmantic.core.top_down")
 local bottom_up_mod  = require("diffmantic.core.bottom_up")
 local recovery_mod   = require("diffmantic.core.recovery")
 local actions_mod    = require("diffmantic.core.actions")
+local rename_mod     = require("diffmantic.core.rename")
 local analysis_mod   = require("diffmantic.core.analysis")
 local prematch_mod   = require("diffmantic.core.line_prematch")
 local ts             = require("diffmantic.treesitter")
@@ -101,6 +105,16 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		mappings, src_info, dst_info,
 		opts
 	)
+	acts = rename_mod.promote(acts, {
+		mappings = mappings,
+		src_info = src_info,
+		dst_info = dst_info,
+		src_root = src_root,
+		dst_root = dst_root,
+		src_buf = opts and opts.src_buf,
+		dst_buf = opts and opts.dst_buf,
+		opts = opts,
+	})
 	analysis_mod.enrich(acts, {
 		src_buf = opts and opts.src_buf,
 		dst_buf = opts and opts.dst_buf,
