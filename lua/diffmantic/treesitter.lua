@@ -34,7 +34,8 @@ function M.preprocess_tree(root, bufnr, opts)
 
 	local lang = opts.lang
 	if not lang then
-		lang = vim.bo[bufnr] and vim.bo[bufnr].filetype or ""
+		local ft = vim.bo[bufnr] and vim.bo[bufnr].filetype or ""
+		lang = vim.treesitter.language.get_lang(ft) or ft
 	end
 	local rules = rules_mod.get(lang)
 
@@ -82,10 +83,6 @@ function M.preprocess_tree(root, bufnr, opts)
 				end_byte   = eb,
 				parent_id = parent_id,
 			}
-			if parent_id then
-				local pi = info[parent_id]
-				if pi then pi.parent_id = pi.parent_id end -- already set
-			end
 			return info[id]
 		end
 

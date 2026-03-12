@@ -3,16 +3,6 @@ local M = {}
 
 local MIN_HEIGHT = 1
 
-
-local function build_maps(mappings)
-	local s2d, d2s = {}, {}
-	for _, m in ipairs(mappings) do
-		s2d[m.src] = m.dst
-		d2s[m.dst] = m.src
-	end
-	return s2d, d2s
-end
-
 local function get_children(node, info)
 	local kids = {}
 	for child in node:iter_children() do
