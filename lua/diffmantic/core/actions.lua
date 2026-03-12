@@ -197,6 +197,30 @@ local function pair_key_text(node, buf)
 	return ""
 end
 
+local function pair_value_node(node, info)
+	if not node then
+		return nil
+	end
+	local named = {}
+	for child in node:iter_children() do
+		local ok_named, is_named = pcall(child.named, child)
+		if ok_named and is_named and info[child:id()] then
+			table.insert(named, child)
+		end
+	end
+	return named[2]
+end
+
+local function property_key_text(info_entry, buf)
+	if not info_entry or not info_entry.node then
+		return ""
+	end
+	if info_entry.type == "pair" then
+		return pair_key_text(info_entry.node, buf)
+	end
+	return node_text(info_entry.node, buf)
+end
+
 local function is_leaf_info(info_entry)
 	if not info_entry then
 		return false
@@ -576,6 +600,132 @@ local function collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d,
 		table.insert(filtered, action)
 	end
 
+	return filtered
+end
+
+local function collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2s, src_buf, dst_buf)
+	local function is_source_property(info_entry)
+		return info_entry and (info_entry.type == "shorthand_property_identifier" or info_entry.type == "pair")
+	end
+
+	local insert_by_node = {}
+	local delete_by_node = {}
+	local update_by_dst = {}
+	for idx, action in ipairs(actions or {}) do
+		if action.type == "insert" and action.dst_node then
+			local did = action.dst_node:id()
+			insert_by_node[did] = idx
+		elseif action.type == "delete" and action.src_node then
+			local sid = action.src_node:id()
+			delete_by_node[sid] = idx
+		elseif action.type == "update" and action.dst_node then
+			local did = action.dst_node:id()
+			update_by_dst[did] = update_by_dst[did] or {}
+			table.insert(update_by_dst[did], idx)
+		end
+	end
+
+	local drop = {}
+	local appended = {}
+	local used_dst = {}
+
+	for sid, si in pairs(src_info or {}) do
+		if not is_source_property(si) or s2d[sid] then
+			goto continue_src
+		end
+		local mapped_parent = si.parent_id and s2d[si.parent_id] or nil
+		if not mapped_parent then
+			goto continue_src
+		end
+
+		local src_key = property_key_text(si, src_buf)
+		if src_key == "" then
+			goto continue_src
+		end
+
+		local best_di = nil
+		local best_dist = nil
+		for did, di in pairs(dst_info or {}) do
+			if used_dst[did] or d2s[did] then
+				goto continue_dst
+			end
+			if not di or di.type ~= "pair" or di.parent_id ~= mapped_parent then
+				goto continue_dst
+			end
+			local dst_key = property_key_text(di, dst_buf)
+			if dst_key ~= src_key then
+				goto continue_dst
+			end
+			local dist = math.abs((si.start_row or 0) - (di.start_row or 0))
+			if not best_di or dist < best_dist then
+				best_di = did
+				best_dist = dist
+			end
+			::continue_dst::
+		end
+
+		if not best_di then
+			goto continue_src
+		end
+
+		local di = dst_info[best_di]
+		local src_range = node_range(si.node)
+		local dst_range = node_range(di.node)
+		if not src_range or not dst_range then
+			goto continue_src
+		end
+
+		local dst_value = pair_value_node(di.node, dst_info)
+		local dst_value_text = node_text(dst_value, dst_buf)
+		local dst_text = node_label(di, dst_buf)
+		if dst_text == "" and dst_value_text ~= "" then
+			dst_text = src_key .. ": " .. dst_value_text
+		end
+
+		local existing_insert = insert_by_node[best_di]
+		if existing_insert then
+			drop[existing_insert] = true
+		end
+		local existing_delete = delete_by_node[sid]
+		if existing_delete then
+			drop[existing_delete] = true
+		end
+		for _, idx in ipairs(update_by_dst[best_di] or {}) do
+			drop[idx] = true
+		end
+
+		table.insert(appended, {
+			type = "update",
+			src = src_range,
+			dst = dst_range,
+			src_node = si.node,
+			dst_node = di.node,
+			metadata = {
+				node_type = "pair",
+				old_name = node_label(si, src_buf),
+				new_name = dst_text,
+				from_line = src_range.start_row + 1,
+				to_line = dst_range.start_row + 1,
+			},
+		})
+		used_dst[best_di] = true
+
+		::continue_src::
+	end
+
+	if next(drop) == nil and #appended == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for idx, action in ipairs(actions or {}) do
+		if not drop[idx] then
+			table.insert(filtered, action)
+		end
+	end
+	for _, action in ipairs(appended) do
+		table.insert(filtered, action)
+	end
 	return filtered
 end
 
@@ -1474,6 +1624,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 	actions = add_control_condition_updates(actions, mappings, src_info, dst_info, src_buf, dst_buf)
 	actions = suppress_condition_nested_edits(actions)
 	actions = collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d, src_buf, dst_buf)
+	actions = collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2s, src_buf, dst_buf)
 	actions = collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
 	actions = suppress_fragmented_updates(actions)
 	actions = suppress_nested_leaf_edits(actions)

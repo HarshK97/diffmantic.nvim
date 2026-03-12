@@ -172,6 +172,11 @@ local function lang_for_buf(buf, opts)
 	return vim.treesitter.language.get_lang(ft) or ft
 end
 
+local function is_c_family_lang(buf, opts)
+	local lang = lang_for_buf(buf, opts)
+	return lang == "c" or lang == "cpp"
+end
+
 local function collect_rename_capture_ids(root, buf, opts)
 	local ids = {}
 	if not root or not buf then
@@ -592,6 +597,14 @@ local function is_duplicate_of_rename(action, rename_pairs_by_node)
 	return rename_pairs_by_node[sid .. "|" .. did] == true
 end
 
+local function preserve_coarse_update(action, _src_info, _dst_info, _src_buf, _opts)
+	if not action or action.type ~= "update" then
+		return false
+	end
+	local meta = action.metadata or {}
+	return meta.node_type == "string_literal" or meta.node_type == "char_literal"
+end
+
 function M.promote(actions, ctx)
 	if not actions or #actions == 0 then
 		return actions
@@ -773,7 +786,8 @@ function M.promote(actions, ctx)
 		for idx, action in ipairs(actions) do
 			if not drop[idx] and action.type == "update" then
 				local meta = action.metadata or {}
-				if COARSE_DROP_UPDATE_TYPES[meta.node_type] then
+				if COARSE_DROP_UPDATE_TYPES[meta.node_type]
+					and not preserve_coarse_update(action, src_info, dst_info, src_buf, opts) then
 					drop[idx] = true
 				end
 			end

@@ -138,6 +138,14 @@ local HUNK_STYLE = {
 	},
 }
 
+local RENAME_SUPPRESSED_NODE_TYPES = {
+	identifier = true,
+	field_identifier = true,
+	property_identifier = true,
+	type_identifier = true,
+	namespace_identifier = true,
+}
+
 local function range_text(buf, range)
 	if not buf or not range then
 		return nil
@@ -160,7 +168,7 @@ local function range_text(buf, range)
 	return line:sub(start_col, end_col)
 end
 
-local function hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf)
+local function hunk_is_effective_non_rename(hunk, action, rename_pairs, src_buf, dst_buf)
 	if not hunk then
 		return false
 	end
@@ -175,10 +183,17 @@ local function hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf
 	if not src_text or not dst_text then
 		return true
 	end
-	return src_text ~= dst_text and rename_pairs[src_text] ~= dst_text
+	if src_text == dst_text then
+		return false
+	end
+	local meta = action and action.metadata or {}
+	if not RENAME_SUPPRESSED_NODE_TYPES[meta.node_type] then
+		return true
+	end
+	return rename_pairs[src_text] ~= dst_text
 end
 
-local function effective_update_hunks(action, src_buf, dst_buf)
+function M.effective_update_hunks(action, src_buf, dst_buf)
 	local analysis = action and action.analysis or nil
 	local hunks = analysis and analysis.hunks or nil
 	if not hunks or #hunks == 0 then
@@ -192,7 +207,7 @@ local function effective_update_hunks(action, src_buf, dst_buf)
 	local rename_pairs = analysis.rename_pairs or {}
 	local effective = {}
 	for _, hunk in ipairs(normalized) do
-		if hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf) then
+		if hunk_is_effective_non_rename(hunk, action, rename_pairs, src_buf, dst_buf) then
 			table.insert(effective, hunk)
 		end
 	end
@@ -237,7 +252,7 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 			local style = base_style
 
 			if action.type == "update" then
-				local effective_hunks = effective_update_hunks(action, src_buf, dst_buf)
+				local effective_hunks = M.effective_update_hunks(action, src_buf, dst_buf)
 				if #effective_hunks == 0 then
 					goto continue
 				end
