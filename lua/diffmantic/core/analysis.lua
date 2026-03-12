@@ -9,6 +9,7 @@ local line_len
 local local_to_abs_range
 local full_node_range
 local should_use_full_token_hunk
+local use_word_level_hunks
 
 local FULL_TOKEN_TYPES = {
 	identifier = true,
@@ -32,13 +33,17 @@ function M.enrich(actions, opts)
 			local ok_dst, dst_text = pcall(vim.treesitter.get_node_text, action.dst_node, dst_buf)
 
 			if ok_src and ok_dst and src_text and dst_text then
-				local hunks = compute_hunks(src_text, dst_text, action, src_buf, dst_buf)
+				local hunks = compute_hunks(src_text, dst_text, action, src_buf, dst_buf, opts)
 				action.analysis = { hunks = hunks }
 			else
 				action.analysis = { hunks = {} }
 			end
 		end
 	end
+end
+
+use_word_level_hunks = function(opts)
+	return opts and opts.word_level_hunks == true
 end
 
 line_len = function(lines, idx)
@@ -105,7 +110,7 @@ should_use_full_token_hunk = function(action, src_text, dst_text)
 	return is_word_like(src_text) and is_word_like(dst_text)
 end
 
-compute_hunks = function(src_text, dst_text, action, _src_buf, _dst_buf)
+compute_hunks = function(src_text, dst_text, action, _src_buf, _dst_buf, opts)
 	local hunks = {}
 
 	if should_use_full_token_hunk(action, src_text, dst_text) then
@@ -199,7 +204,7 @@ compute_hunks = function(src_text, dst_text, action, _src_buf, _dst_buf)
 			local src_col_e = line_len(src_lines, src_s + src_c - 1)
 			local dst_col_s = 0
 			local dst_col_e = line_len(dst_lines, dst_s + dst_c - 1)
-			if src_c == 1 and dst_c == 1 then
+			if use_word_level_hunks(opts) and src_c == 1 and dst_c == 1 then
 				local sl = src_lines[src_s] or ""
 				local dl = dst_lines[dst_s] or ""
 				src_col_s, src_col_e, dst_col_s, dst_col_e = word_diff_cols(sl, dl)

@@ -3,17 +3,7 @@ local M = {}
 
 local MIN_MOVE_SIZE = 3
 
-local FIELD_ID_BLOCKED_PARENTS = {
-	field_declaration = true,
-}
 local function is_update_blocked(si, info)
-	if si.type ~= "field_identifier" then return false end
-	if si.parent_id then
-		local pi = info[si.parent_id]
-		if pi and FIELD_ID_BLOCKED_PARENTS[pi.type] then
-			return true
-		end
-	end
 	return false
 end
 
@@ -41,6 +31,96 @@ local FUNCTION_CONTAINER_TYPES = {
 	function_expression = true,
 	arrow_function = true,
 }
+
+local function is_descendant_or_same(id, ancestor_id, info)
+	local cur = id
+	while cur do
+		if cur == ancestor_id then
+			return true
+		end
+		local entry = info[cur]
+		cur = entry and entry.parent_id or nil
+	end
+	return false
+end
+
+local function nearest_call_expression(id, info)
+	local cur = id
+	while cur do
+		local entry = info[cur]
+		if not entry then
+			return nil
+		end
+		if entry.type == "call_expression" then
+			return cur
+		end
+		cur = entry.parent_id
+	end
+	return nil
+end
+
+local function call_callee_id(call_id, info)
+	local call = info[call_id]
+	if not call or not call.node then
+		return nil
+	end
+	for child in call.node:iter_children() do
+		local cid = child:id()
+		local cinfo = info[cid]
+		if cinfo and child:named() then
+			if cinfo.type ~= "argument_list" then
+				return cid
+			end
+		end
+	end
+	return nil
+end
+
+local function call_arg_count(call_id, info)
+	local call = info[call_id]
+	if not call or not call.node then
+		return nil
+	end
+	for child in call.node:iter_children() do
+		local cid = child:id()
+		local cinfo = info[cid]
+		if cinfo and cinfo.type == "argument_list" and cinfo.node then
+			local count = 0
+			for arg in cinfo.node:iter_children() do
+				if arg:named() and info[arg:id()] then
+					count = count + 1
+				end
+			end
+			return count
+		end
+	end
+	return nil
+end
+
+local function call_callee_arity_compatible(sid, did, src_info, dst_info)
+	local src_call = nearest_call_expression(sid, src_info)
+	local dst_call = nearest_call_expression(did, dst_info)
+	if not src_call or not dst_call then
+		return true
+	end
+
+	local src_callee = call_callee_id(src_call, src_info)
+	local dst_callee = call_callee_id(dst_call, dst_info)
+	if not src_callee or not dst_callee then
+		return true
+	end
+
+	if not is_descendant_or_same(sid, src_callee, src_info) or not is_descendant_or_same(did, dst_callee, dst_info) then
+		return true
+	end
+
+	local src_args = call_arg_count(src_call, src_info)
+	local dst_args = call_arg_count(dst_call, dst_info)
+	if src_args and dst_args and src_args ~= dst_args then
+		return false
+	end
+	return true
+end
 
 
 local function build_maps(mappings)
@@ -301,6 +381,34 @@ local function has_stable_mapped_neighbors(sid, did, src_info, dst_info, s2d, d2
 	return prev_ok and next_ok
 end
 
+local function allow_unmapped_field_decl_parent(si, di, src_info, dst_info, s2d)
+	if not si or not di then
+		return false
+	end
+	if si.type ~= "field_identifier" or di.type ~= "field_identifier" then
+		return false
+	end
+	local spid = si.parent_id
+	local dpid = di.parent_id
+	if not spid or not dpid then
+		return false
+	end
+	local sp = src_info[spid]
+	local dp = dst_info[dpid]
+	if not sp or not dp then
+		return false
+	end
+	if sp.type ~= "field_declaration" or dp.type ~= "field_declaration" then
+		return false
+	end
+	local sgpid = sp.parent_id
+	local dgpid = dp.parent_id
+	if not sgpid or not dgpid then
+		return false
+	end
+	return s2d[sgpid] == dgpid
+end
+
 local function lis_membership(seq, displacement)
 	local n = #seq
 	if n == 0 then return {} end
@@ -514,6 +622,10 @@ local function descendants_fully_mapped(root_id, info, peer_map, children_by_par
 end
 
 local function collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
+	local function is_wrapper_type(type_)
+		return type_ == "field" or type_ == "field_declaration" or type_ == "if_statement"
+	end
+
 	local src_children = build_children_index(src_info)
 	local dst_children = build_children_index(dst_info)
 	local drop = {}
@@ -522,13 +634,13 @@ local function collapse_redundant_field_wrappers(actions, src_info, dst_info, s2
 		if action.type == "insert" and action.dst_node then
 			local did = action.dst_node:id()
 			local di = dst_info[did]
-			if di and di.type == "field" and descendants_fully_mapped(did, dst_info, d2s, dst_children) then
+			if di and is_wrapper_type(di.type) and descendants_fully_mapped(did, dst_info, d2s, dst_children) then
 				drop[i] = true
 			end
 		elseif action.type == "delete" and action.src_node then
 			local sid = action.src_node:id()
 			local si = src_info[sid]
-			if si and si.type == "field" and descendants_fully_mapped(sid, src_info, s2d, src_children) then
+			if si and is_wrapper_type(si.type) and descendants_fully_mapped(sid, src_info, s2d, src_children) then
 				drop[i] = true
 			end
 		end
@@ -545,6 +657,340 @@ local function collapse_redundant_field_wrappers(actions, src_info, dst_info, s2
 		end
 	end
 	return filtered
+end
+
+local LEAF_EDIT_TYPES = {
+	identifier = true,
+	field_identifier = true,
+	property_identifier = true,
+	type_identifier = true,
+	namespace_identifier = true,
+	number_literal = true,
+	string_literal = true,
+	char_literal = true,
+}
+
+local function suppress_fragmented_updates(actions)
+	local delete_regions = {}
+	local insert_regions = {}
+
+	for _, action in ipairs(actions or {}) do
+		local meta = action.metadata or {}
+		local node_type = meta.node_type
+		if action.type == "delete" and action.src and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(delete_regions, action.src)
+		elseif action.type == "insert" and action.dst and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(insert_regions, action.dst)
+		end
+	end
+
+	if #delete_regions == 0 or #insert_regions == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for _, action in ipairs(actions) do
+		if action.type == "update" and action.src and action.dst then
+			local in_delete = false
+			for _, region in ipairs(delete_regions) do
+				if range_contains(region, action.src) then
+					in_delete = true
+					break
+				end
+			end
+
+			local in_insert = false
+			for _, region in ipairs(insert_regions) do
+				if range_contains(region, action.dst) then
+					in_insert = true
+					break
+				end
+			end
+
+			if in_delete or in_insert then
+				goto continue_action
+			end
+		end
+
+		table.insert(filtered, action)
+		::continue_action::
+	end
+
+	return filtered
+end
+
+local function suppress_nested_leaf_edits(actions)
+	local delete_regions = {}
+	local insert_regions = {}
+
+	for _, action in ipairs(actions or {}) do
+		local meta = action.metadata or {}
+		local node_type = meta.node_type
+		if action.type == "delete" and action.src and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(delete_regions, action.src)
+		elseif action.type == "insert" and action.dst and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(insert_regions, action.dst)
+		end
+	end
+
+	if #delete_regions == 0 and #insert_regions == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for _, action in ipairs(actions or {}) do
+		local drop = false
+		local meta = action.metadata or {}
+		local node_type = meta.node_type
+		if LEAF_EDIT_TYPES[node_type] then
+			if action.type == "delete" and action.src then
+				for _, region in ipairs(delete_regions) do
+					if range_contains(region, action.src) then
+						drop = true
+						break
+					end
+				end
+			elseif action.type == "insert" and action.dst then
+				for _, region in ipairs(insert_regions) do
+					if range_contains(region, action.dst) then
+						drop = true
+						break
+					end
+				end
+			end
+		end
+
+		if not drop then
+			table.insert(filtered, action)
+		end
+	end
+
+	return filtered
+end
+
+local function is_control_condition_expr(id, info)
+	local entry = info and info[id] or nil
+	if not entry or entry.type ~= "binary_expression" then
+		return false
+	end
+	local pid = entry.parent_id
+	local p = pid and info[pid] or nil
+	if not p then
+		return false
+	end
+	if p.type == "condition_clause" then
+		return true
+	end
+	if p.type == "for_statement" or p.type == "while_statement" then
+		return true
+	end
+	return false
+end
+
+local function add_control_condition_updates(actions, mappings, src_info, dst_info, src_buf, dst_buf)
+	local seen_src = {}
+	for _, action in ipairs(actions or {}) do
+		if action.type == "update" and action.src_node then
+			seen_src[action.src_node:id()] = true
+		end
+	end
+
+	for _, m in ipairs(mappings or {}) do
+		local sid = m.src
+		local did = m.dst
+		if not seen_src[sid] then
+			local si = src_info[sid]
+			local di = dst_info[did]
+			if si and di and si.type == di.type and is_control_condition_expr(sid, src_info) and is_control_condition_expr(did, dst_info) then
+				local src_text = node_text(si.node, src_buf)
+				local dst_text = node_text(di.node, dst_buf)
+				if src_text ~= "" and dst_text ~= "" and src_text ~= dst_text then
+					local src_range = node_range(si.node)
+					local dst_range = node_range(di.node)
+					table.insert(actions, {
+						type = "update",
+						src = src_range,
+						dst = dst_range,
+						src_node = si.node,
+						dst_node = di.node,
+						metadata = {
+							node_type = si.type,
+							old_name = src_text,
+							new_name = dst_text,
+							from_line = src_range and (src_range.start_row + 1) or nil,
+							to_line = dst_range and (dst_range.start_row + 1) or nil,
+							condition_update = true,
+						},
+					})
+					seen_src[sid] = true
+				end
+			end
+		end
+	end
+
+	return actions
+end
+
+local function suppress_condition_nested_edits(actions)
+	local condition_pairs = {}
+	for _, action in ipairs(actions or {}) do
+		local meta = action.metadata or {}
+		if action.type == "update" and meta.condition_update and action.src and action.dst then
+			table.insert(condition_pairs, { src = action.src, dst = action.dst, action = action })
+		end
+	end
+
+	if #condition_pairs == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for _, action in ipairs(actions) do
+		local drop = false
+		if action.type == "insert" and action.dst then
+			for _, pair in ipairs(condition_pairs) do
+				if range_contains(pair.dst, action.dst) then
+					drop = true
+					break
+				end
+			end
+		elseif action.type == "delete" and action.src then
+			for _, pair in ipairs(condition_pairs) do
+				if range_contains(pair.src, action.src) then
+					drop = true
+					break
+				end
+			end
+		elseif action.type == "update" then
+			local meta = action.metadata or {}
+			if not meta.condition_update and action.src and action.dst then
+				for _, pair in ipairs(condition_pairs) do
+					if range_contains(pair.src, action.src) or range_contains(pair.dst, action.dst) then
+						drop = true
+						break
+					end
+				end
+			end
+		end
+
+		if not drop then
+			table.insert(filtered, action)
+		end
+	end
+
+	return filtered
+end
+
+local function add_assignment_replacements(actions, mappings, src_info, dst_info, src_buf, dst_buf, s2d)
+	local function assignment_lr_types(info_entry, info)
+		if not info_entry or not info_entry.node then
+			return nil, nil
+		end
+		local named = {}
+		for child in info_entry.node:iter_children() do
+			local ok_named, is_named = pcall(child.named, child)
+			if ok_named and is_named then
+				local cinfo = info[child:id()]
+				if cinfo then
+					table.insert(named, cinfo.type)
+				end
+			end
+		end
+		if #named < 2 then
+			return nil, nil
+		end
+		return named[1], named[#named]
+	end
+
+	local covered_src = {}
+	local covered_dst = {}
+	for _, action in ipairs(actions or {}) do
+		if action.src_node then
+			covered_src[action.src_node:id()] = true
+		end
+		if action.dst_node then
+			covered_dst[action.dst_node:id()] = true
+		end
+	end
+
+	for _, m in ipairs(mappings or {}) do
+		local sid = m.src
+		local did = m.dst
+		local si = src_info[sid]
+		local di = dst_info[did]
+		if not si or not di then
+			goto continue_mapping
+		end
+		if si.type ~= "assignment_expression" or di.type ~= "assignment_expression" then
+			goto continue_mapping
+		end
+
+		local rep_sid, rep_did = sid, did
+		local rep_si, rep_di = si, di
+		local spid = si.parent_id
+		local dpid = di.parent_id
+		local sp = spid and src_info[spid] or nil
+		local dp = dpid and dst_info[dpid] or nil
+		if sp and dp and sp.type == "expression_statement" and dp.type == "expression_statement" and s2d[spid] == dpid then
+			rep_sid, rep_did = spid, dpid
+			rep_si, rep_di = sp, dp
+		end
+
+		if covered_src[rep_sid] or covered_dst[rep_did] then
+			goto continue_mapping
+		end
+
+		local src_text = node_text(rep_si.node, src_buf)
+		local dst_text = node_text(rep_di.node, dst_buf)
+		if src_text == "" or dst_text == "" or src_text == dst_text then
+			goto continue_mapping
+		end
+
+		local src_lhs_type, src_rhs_type = assignment_lr_types(si, src_info)
+		local dst_lhs_type, dst_rhs_type = assignment_lr_types(di, dst_info)
+		local shape_changed = (src_lhs_type and dst_lhs_type and src_lhs_type ~= dst_lhs_type)
+			or (src_rhs_type and dst_rhs_type and src_rhs_type ~= dst_rhs_type)
+		if not shape_changed then
+			goto continue_mapping
+		end
+
+		local src_range = node_range(rep_si.node)
+		local dst_range = node_range(rep_di.node)
+		if not src_range or not dst_range then
+			goto continue_mapping
+		end
+
+		table.insert(actions, {
+			type = "delete",
+			src = src_range,
+			dst = nil,
+			src_node = rep_si.node,
+			dst_node = nil,
+			metadata = {
+				node_type = rep_si.type,
+				old_name = src_text,
+				from_line = src_range.start_row + 1,
+			},
+		})
+		table.insert(actions, {
+			type = "insert",
+			src = nil,
+			dst = dst_range,
+			src_node = nil,
+			dst_node = rep_di.node,
+			metadata = {
+				node_type = rep_di.type,
+				new_name = dst_text,
+				to_line = dst_range.start_row + 1,
+			},
+		})
+
+		covered_src[rep_sid] = true
+		covered_dst[rep_did] = true
+		::continue_mapping::
+	end
+
+	return actions
 end
 
 
@@ -566,7 +1012,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if not di then goto cont_ins end
 		local parent_did = di.parent_id
 		local dst_size = di.size or 1
-		local size_ok = dst_size > 1 or should_emit_named_leaf_edit(di)
+		local size_ok = dst_size > 1 and not LEAF_EDIT_TYPES[di.type]
 		if (not parent_did or d2s[parent_did]) and size_ok then
 			local emit_info = di
 			if di.type == "expression_statement" and di.node then
@@ -614,18 +1060,21 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 			and not is_update_blocked(si, src_info)
 			and is_leaf_info(si)
 			and is_leaf_info(di)
-			and src_label ~= ""
-			and dst_label ~= ""
-			and src_label ~= dst_label
-			if update_allowed then
-				if si.parent_id and not s2d[si.parent_id] then
-					update_allowed = false
-				elseif di.parent_id and not d2s[di.parent_id] then
-					update_allowed = false
+				and src_label ~= ""
+				and dst_label ~= ""
+				and src_label ~= dst_label
+				if update_allowed then
+					if si.parent_id and not s2d[si.parent_id] then
+						update_allowed = allow_unmapped_field_decl_parent(si, di, src_info, dst_info, s2d)
+					elseif di.parent_id and not d2s[di.parent_id] then
+						update_allowed = allow_unmapped_field_decl_parent(si, di, src_info, dst_info, s2d)
+					end
 				end
-			end
-			if update_allowed then
-				local src_fc = nearest_function_container(sid, src_info)
+				if update_allowed then
+					update_allowed = call_callee_arity_compatible(sid, did, src_info, dst_info)
+				end
+				if update_allowed then
+					local src_fc = nearest_function_container(sid, src_info)
 				local dst_fc = nearest_function_container(did, dst_info)
 				if (src_fc and not dst_fc) or (dst_fc and not src_fc) then
 					update_allowed = false
@@ -963,9 +1412,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		if not si then goto cont_del end
 		local parent_sid = si.parent_id
 		local src_size = si.size or 1
-		local size_ok = src_size > 1
-			or si.type == "shorthand_property_identifier"
-			or should_emit_named_leaf_edit(si)
+		local size_ok = src_size > 1 and not LEAF_EDIT_TYPES[si.type]
 		if (not parent_sid or s2d[parent_sid]) and size_ok then
 			local range = node_range(si.node)
 			table.insert(actions, {
@@ -1024,8 +1471,13 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 		actions = filtered
 	end
 
+	actions = add_control_condition_updates(actions, mappings, src_info, dst_info, src_buf, dst_buf)
+	actions = suppress_condition_nested_edits(actions)
 	actions = collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d, src_buf, dst_buf)
 	actions = collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
+	actions = suppress_fragmented_updates(actions)
+	actions = suppress_nested_leaf_edits(actions)
+	actions = add_assignment_replacements(actions, mappings, src_info, dst_info, src_buf, dst_buf, s2d)
 
 	return actions
 end
