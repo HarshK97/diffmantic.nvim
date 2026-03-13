@@ -1,20 +1,21 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/logo-dark.png">
-    <img alt="Diffmantic Logo" src="images/logo-light.png">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <img alt="Diffmantic Logo" src="assets/logo-light.png">
   </picture>
 </p>
 
 Semantic diff for Neovim using Tree-sitter. Understands code structure to detect moved functions, updated blocks, and real changes, not just line differences.
 
-![Demo](images/python.png)
+![Demo](assets/demo.png)
 
 ## Features
 
 - **Move detection** — Knows when code blocks are moved, not deleted and re-added
 - **Update detection** — Highlights modified code in place
 - **Insert/Delete detection** — Shows new and removed code
-- **Language agnostic** — Works with any language that has a Tree-sitter parser
+- **Rename detection** — Shows renamed variables and functions
+- **Language agnostic** — Works with languages that have Tree-sitter parsers and diffmantic query support
 
 ## Installation
 
@@ -45,11 +46,13 @@ Compare current buffer with another file:
 
 ## How It Works
 
-Implements the [GumTree algorithm](https://hal.science/hal-04855170v1/file/GumTree_simple__fine_grained__accurate_and_scalable_source_differencing.pdf) for AST matching:
+The current core follows a multi-phase AST matching pipeline:
 
-1. **Top-down matching** — Finds identical subtrees by hash
-2. **Bottom-up matching** — Matches parents based on mapped children
-3. **Recovery matching** — LCS-based matching for remaining nodes
+1. **Pre-match** — Seeds stable mappings from unchanged lines
+2. **Top-down matching** — Finds identical/high-confidence subtree pairs
+3. **Bottom-up matching** — Expands matches using mapped descendants
+4. **Recovery matching** — Iteratively recovers remaining valid mappings
+5. **Action generation + analysis** — Produces move/update/insert/delete actions and refined hunks
 
 ## Requirements
 
@@ -59,3 +62,9 @@ Implements the [GumTree algorithm](https://hal.science/hal-04855170v1/file/GumTr
 ## License
 
 MIT
+
+## Acknowledgements
+
+- GumTree repository: <https://github.com/GumTreeDiff/gumtree>
+- GumTree paper: <https://hal.science/hal-04855170v1/file/GumTree_simple__fine_grained__accurate_and_scalable_source_differencing.pdf>
+- Beyond GumTree paper: <https://www.researchgate.net/publication/335498580_Beyond_GumTree_A_Hybrid_Approach_to_Generate_Edit_Scripts>
