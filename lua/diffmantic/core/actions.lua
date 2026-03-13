@@ -577,6 +577,7 @@ local function collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d,
 						or (del_action.metadata and del_action.metadata.from_line)
 						or nil,
 					to_line = (ins_action.dst and (ins_action.dst.start_row + 1))
+						or (ins_action.metadata and ins_action.metadata.to_line)
 						or (ins_action.metadata and ins_action.metadata.from_line)
 						or nil,
 				},
@@ -608,6 +609,21 @@ local function collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2
 		return info_entry and (info_entry.type == "shorthand_property_identifier" or info_entry.type == "pair")
 	end
 
+	local function build_dst_pair_index()
+		local index = {}
+		for did, di in pairs(dst_info or {}) do
+			if di and di.type == "pair" and di.parent_id then
+				local key = property_key_text(di, dst_buf)
+				if key ~= "" then
+					index[di.parent_id] = index[di.parent_id] or {}
+					index[di.parent_id][key] = index[di.parent_id][key] or {}
+					table.insert(index[di.parent_id][key], did)
+				end
+			end
+		end
+		return index
+	end
+
 	local insert_by_node = {}
 	local delete_by_node = {}
 	local update_by_dst = {}
@@ -628,6 +644,7 @@ local function collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2
 	local drop = {}
 	local appended = {}
 	local used_dst = {}
+	local dst_pair_index = build_dst_pair_index()
 
 	for sid, si in pairs(src_info or {}) do
 		if not is_source_property(si) or s2d[sid] then
@@ -645,23 +662,18 @@ local function collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2
 
 		local best_di = nil
 		local best_dist = nil
-		for did, di in pairs(dst_info or {}) do
+		local candidates = dst_pair_index[mapped_parent] and dst_pair_index[mapped_parent][src_key] or nil
+		for _, did in ipairs(candidates or {}) do
+			local di = dst_info[did]
 			if used_dst[did] or d2s[did] then
-				goto continue_dst
-			end
-			if not di or di.type ~= "pair" or di.parent_id ~= mapped_parent then
-				goto continue_dst
-			end
-			local dst_key = property_key_text(di, dst_buf)
-			if dst_key ~= src_key then
-				goto continue_dst
+				goto continue_candidate
 			end
 			local dist = math.abs((si.start_row or 0) - (di.start_row or 0))
 			if not best_di or dist < best_dist then
 				best_di = did
 				best_dist = dist
 			end
-			::continue_dst::
+			::continue_candidate::
 		end
 
 		if not best_di then
@@ -1187,7 +1199,7 @@ function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, op
 				metadata = {
 					node_type = emit_info.type,
 					new_name  = node_label(emit_info, dst_buf),
-					from_line = range and (range.start_row + 1) or nil,
+					to_line   = range and (range.start_row + 1) or nil,
 				},
 			})
 		end
