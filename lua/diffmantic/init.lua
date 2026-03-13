@@ -38,7 +38,6 @@ local function setup_highlights()
 	local change_bg = pick_bg({ "DiffText", "DiffChange" })
 	local move_bg = pick_bg({ "DiffChange", "DiffText" })
 	if move_bg == change_bg then
-		-- If move and change resolve to the same background, de-emphasize move fill so updates remain visible.
 		move_bg = nil
 	end
 
@@ -63,10 +62,6 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "DiffmanticChangeSign", { fg = change_sign_fg, bg = "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticMoveSign", { fg = move_sign_fg, bg = "NONE" })
 	vim.api.nvim_set_hl(0, "DiffmanticRenameSign", { fg = change_sign_fg, bg = "NONE" })
-
-	vim.api.nvim_set_hl(0, "DiffmanticAddFiller", { fg = add_sign_fg, bg = add_bg })
-	vim.api.nvim_set_hl(0, "DiffmanticDeleteFiller", { fg = delete_sign_fg, bg = delete_bg })
-	vim.api.nvim_set_hl(0, "DiffmanticMoveFiller", { fg = move_sign_fg, bg = move_bg })
 end
 
 function M.setup(opts)
@@ -92,7 +87,6 @@ function M.diff(args)
 	local win1, win2
 
 	if file2 then
-		-- Case: 2 files provided. Open them in split.
 		vim.cmd("tabnew")
 		vim.cmd("edit " .. file1)
 		buf1 = vim.api.nvim_get_current_buf()
@@ -102,7 +96,6 @@ function M.diff(args)
 		buf2 = vim.api.nvim_get_current_buf()
 		win2 = vim.api.nvim_get_current_win()
 	else
-		-- Case: 1 file provided. Compare current buffer vs file.
 		buf1 = vim.api.nvim_get_current_buf()
 		win1 = vim.api.nvim_get_current_win()
 		local expanded_path = vim.fn.expand(file1)
@@ -129,48 +122,24 @@ function M.diff(args)
 	local src_role_index = roles.build_index(root1, buf1)
 	local dst_role_index = roles.build_index(root2, buf2)
 
-	local mappings, src_info, dst_info = core.top_down_match(root1, root2, buf1, buf2, {
-		adaptive_mode = true,
-	})
-	-- print("Top-down mappings: " .. #mappings)
-
-	-- local before_bottom_up = #mappings
-	mappings = core.bottom_up_match(mappings, src_info, dst_info, root1, root2, buf1, buf2, {
-		src_role_index = src_role_index,
-		dst_role_index = dst_role_index,
-		adaptive_mode = true,
-	})
-	-- print("Mappings after Bottom-up: " .. #mappings .. " (+" .. (#mappings - before_bottom_up) .. " new)")
-
-	-- local before_recovery = #mappings
-	local src_count = 0
-	local dst_count = 0
-	for _ in pairs(src_info) do
-		src_count = src_count + 1
-	end
-	for _ in pairs(dst_info) do
-		dst_count = dst_count + 1
-	end
-	local max_nodes = math.max(src_count, dst_count)
-	mappings = core.recovery_match(root1, root2, mappings, src_info, dst_info, buf1, buf2, {
-		recovery_lcs_cell_limit = max_nodes >= 25000 and 1500 or 6000,
-		adaptive_mode = true,
-	})
-	-- debug_utils.print_recovery_mappings(mappings, before_recovery, src_info, dst_info, buf1, buf2)
-
-	local actions = core.generate_actions(root1, root2, mappings, src_info, dst_info, {
+	local result = core.diff(root1, root2, {
 		src_buf = buf1,
 		dst_buf = buf2,
 		src_role_index = src_role_index,
 		dst_role_index = dst_role_index,
-		adaptive_mode = true,
 	})
+	local actions = result.actions or {}
+	local mappings = result.mappings or {}
+	local src_info = result.src_info or {}
+	local dst_info = result.dst_info or {}
 	vim.diagnostic.enable(false, { bufnr = buf1 })
 	vim.diagnostic.enable(false, { bufnr = buf2 })
 
-	-- debug_utils.print_actions(actions, buf1, buf2)
-	-- debug_utils.print_mappings(mappings, src_info, dst_info, buf1, buf2)
-	ui.apply_highlights(buf1, buf2, actions, { mappings = mappings, src_info = src_info, dst_info = dst_info })
+	ui.apply_highlights(buf1, buf2, actions, {
+		mappings = mappings,
+		src_info = src_info,
+		dst_info = dst_info,
+	})
 
 	vim.api.nvim_win_set_cursor(win1, { 1, 0 })
 	vim.api.nvim_win_set_cursor(win2, { 1, 0 })

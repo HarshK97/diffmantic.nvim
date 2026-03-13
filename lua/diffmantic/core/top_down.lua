@@ -1,141 +1,570 @@
-local ts_utils = require("diffmantic.treesitter")
 
 local M = {}
 
-local function node_key(info)
-	return info.start_row, info.start_col, info.end_row, info.end_col
+local MIN_HEIGHT = 1
+
+local function get_children(node, info)
+	local kids = {}
+	for child in node:iter_children() do
+		local cid = child:id()
+		if info[cid] then
+			table.insert(kids, child)
+		end
+	end
+	return kids
 end
 
-local function compare_node_order(a, b)
-	local asr, asc, aer, aec = node_key(a)
-	local bsr, bsc, ber, bec = node_key(b)
-	if asr ~= bsr then
-		return asr < bsr
+local CONTAINER_TYPES = {
+	function_definition = true,
+	method_definition = true,
+	function_declaration = true,
+	function_item = true,
+	local_function = true,
+	function_expression = true,
+	arrow_function = true,
+}
+local function get_container(node_id, info)
+	local cur = info[node_id]
+	if not cur then
+		return nil
 	end
-	if asc ~= bsc then
-		return asc < bsc
+	local pid = cur.parent_id
+	while pid do
+		local pi = info[pid]
+		if not pi then
+			break
+		end
+		if CONTAINER_TYPES[pi.type] then
+			return pid
+		end
+		pid = pi.parent_id
 	end
+	return nil
+end
+
+local function container_eligible(src_id, dst_id, src_info, dst_info, s2d)
+	local sc = get_container(src_id, src_info)
+	local dc = get_container(dst_id, dst_info)
+	if not sc and not dc then
+		return true
+	end
+	if not sc or not dc then
+		return false
+	end
+	local sci = src_info[sc]
+	local dci = dst_info[dc]
+	if not sci or not dci or sci.type ~= dci.type then
+		return false
+	end
+	local mapped_dc = s2d[sc]
+	return mapped_dc == nil or mapped_dc == dc
+end
+
+local function add_mapping_recursively(snode, dnode, src_info, dst_info, s2d, d2s, out)
+	local sid = snode:id()
+	local did = dnode:id()
+	if s2d[sid] or d2s[did] then
+		return
+	end
+	s2d[sid] = did
+	d2s[did] = sid
+	table.insert(out, { src = sid, dst = did })
+
+	local skids = get_children(snode, src_info)
+	local dkids = get_children(dnode, dst_info)
+	local n = math.min(#skids, #dkids)
+	for i = 1, n do
+		add_mapping_recursively(skids[i], dkids[i], src_info, dst_info, s2d, d2s, out)
+	end
+end
+
+
+local function node_pos_lt(a, b, info)
+	local ai = info[a]
+	local bi = info[b]
+	if not ai or not bi then
+		return tostring(a) < tostring(b)
+	end
+	local ar = ai.start_row
+	local br = bi.start_row
+	if ar ~= br then
+		if ar == nil then
+			return false
+		end
+		if br == nil then
+			return true
+		end
+		return ar < br
+	end
+	local ac = ai.start_col
+	local bc = bi.start_col
+	if ac ~= bc then
+		if ac == nil then
+			return false
+		end
+		if bc == nil then
+			return true
+		end
+		return ac < bc
+	end
+	local aer = ai.end_row
+	local ber = bi.end_row
 	if aer ~= ber then
+		if aer == nil then
+			return false
+		end
+		if ber == nil then
+			return true
+		end
 		return aer < ber
 	end
+	local aec = ai.end_col
+	local bec = bi.end_col
 	if aec ~= bec then
+		if aec == nil then
+			return false
+		end
+		if bec == nil then
+			return true
+		end
 		return aec < bec
 	end
-	return a.type < b.type
+	return tostring(a) < tostring(b)
 end
 
--- Top-down matching: match nodes from the top of the tree downwards
--- Matches nodes with the same hash at each height level
-function M.top_down_match(src_root, dst_root, src_buf, dst_buf, opts)
-	opts = opts or {}
+local function collect_sorted(info, type_set, exclude_map)
+	local result = {}
+	for id, v in pairs(info) do
+		if type_set[v.type] and not exclude_map[id] then
+			table.insert(result, id)
+		end
+	end
+	table.sort(result, function(a, b)
+		return node_pos_lt(a, b, info)
+	end)
+	return result
+end
+
+
+local FUNC_PREMATCH_TYPES = {
+	function_definition = true,
+	method_definition = true,
+	function_declaration = true,
+	function_item = true,
+	local_function = true,
+	function_expression = true,
+	arrow_function = true,
+}
+
+local FUNC_PREMATCH_THRESHOLD = 0.30
+
+local function get_func_name(node_id, info)
+	local ni = info[node_id]
+	if not ni or not ni.node then
+		return nil
+	end
+	local NAME_TYPES = {
+		field_identifier = true,
+		identifier = true,
+		name = true,
+	}
+	for child in ni.node:iter_children() do
+		local cid = child:id()
+		local ci = info[cid]
+		if ci and NAME_TYPES[ci.type] and ci.label and ci.label ~= "" then
+			return ci.label
+		end
+	end
+	return nil
+end
+
+local function func_child_dice(sid, did, src_info, dst_info)
+	local si = src_info[sid]
+	local di = dst_info[did]
+	if not si or not di or not si.node or not di.node then
+		return 0
+	end
+
+	local src_hashes = {}
+	local total_src, total_dst = 0, 0
+	for child in si.node:iter_children() do
+		local cid = child:id()
+		local ci = src_info[cid]
+		if ci then
+			src_hashes[ci.hash] = (src_hashes[ci.hash] or 0) + 1
+			total_src = total_src + 1
+		end
+	end
+	for child in di.node:iter_children() do
+		local cid = child:id()
+		local ci = dst_info[cid]
+		if ci then
+			total_dst = total_dst + 1
+		end
+	end
+
+	if total_src + total_dst == 0 then
+		return 0
+	end
+
+	local common = 0
+	for child in di.node:iter_children() do
+		local cid = child:id()
+		local ci = dst_info[cid]
+		if ci and src_hashes[ci.hash] and src_hashes[ci.hash] > 0 then
+			common = common + 1
+			src_hashes[ci.hash] = src_hashes[ci.hash] - 1
+		end
+	end
+
+	return 2.0 * common / (total_src + total_dst)
+end
+
+local function prematch_functions(src_info, dst_info, s2d, d2s, out)
+	local src_fns = collect_sorted(src_info, FUNC_PREMATCH_TYPES, s2d)
+	local dst_fns = collect_sorted(dst_info, FUNC_PREMATCH_TYPES, d2s)
+	if #src_fns == 0 or #dst_fns == 0 then
+		return
+	end
+
+	local dst_by_name = {}
+	for _, did in ipairs(dst_fns) do
+		local name = get_func_name(did, dst_info)
+		if name then
+			dst_by_name[name] = dst_by_name[name] or {}
+			table.insert(dst_by_name[name], did)
+		end
+	end
+
+	for _, sid in ipairs(src_fns) do
+		if s2d[sid] then
+			goto next_p1
+		end
+		local sname = get_func_name(sid, src_info)
+		local si = src_info[sid]
+		if sname and dst_by_name[sname] then
+			local best_did, best_score = nil, -1
+			for _, did in ipairs(dst_by_name[sname]) do
+				if not d2s[did] and dst_info[did].type == si.type then
+					local score = func_child_dice(sid, did, src_info, dst_info)
+					if score > best_score then
+						best_score = score
+						best_did = did
+					end
+				end
+			end
+			if best_did then
+				local di = dst_info[best_did]
+				if si.hash == di.hash then
+					add_mapping_recursively(si.node, di.node, src_info, dst_info, s2d, d2s, out)
+				else
+					s2d[sid] = best_did
+					d2s[best_did] = sid
+					table.insert(out, { src = sid, dst = best_did })
+				end
+			end
+		end
+		::next_p1::
+	end
+
+	local candidates = {}
+	for _, sid in ipairs(src_fns) do
+		if s2d[sid] then
+			goto next_p2
+		end
+		local si = src_info[sid]
+		for _, did in ipairs(dst_fns) do
+			if not d2s[did] and dst_info[did].type == si.type then
+				local score = func_child_dice(sid, did, src_info, dst_info)
+				if score >= FUNC_PREMATCH_THRESHOLD then
+					table.insert(candidates, {
+						sid = sid,
+						did = did,
+						score = score,
+						size = si.size or 0,
+					})
+				end
+			end
+		end
+		::next_p2::
+	end
+
+	table.sort(candidates, function(a, b)
+		if a.score ~= b.score then
+			return a.score > b.score
+		end
+		if a.size == b.size then
+			if a.sid == b.sid then
+				return node_pos_lt(a.did, b.did, dst_info)
+			end
+			return node_pos_lt(a.sid, b.sid, src_info)
+		end
+		return a.size > b.size
+	end)
+
+	for _, c in ipairs(candidates) do
+		if not s2d[c.sid] and not d2s[c.did] then
+			local si = src_info[c.sid]
+			local di = dst_info[c.did]
+			if si.hash == di.hash then
+				add_mapping_recursively(si.node, di.node, src_info, dst_info, s2d, d2s, out)
+			else
+				s2d[c.sid] = c.did
+				d2s[c.did] = c.sid
+				table.insert(out, { src = c.sid, dst = c.did })
+			end
+		end
+	end
+end
+
+
+local function build_height_queue(info)
+	local by_height = {}
+	for id, v in pairs(info) do
+		if v.height >= MIN_HEIGHT then
+			by_height[v.height] = by_height[v.height] or {}
+			table.insert(by_height[v.height], id)
+		end
+	end
+	local heights = {}
+	for h, ids in pairs(by_height) do
+		table.insert(heights, h)
+		table.sort(ids, function(a, b)
+			return node_pos_lt(a, b, info)
+		end)
+	end
+	table.sort(heights, function(a, b)
+		return a > b
+	end)
+	return by_height, heights
+end
+
+
+function M.top_down_match(_src_root, _dst_root, _src_buf, _dst_buf, src_info, dst_info, init_mappings, _opts)
 	local mappings = {}
-	local src_info = opts.src_info or ts_utils.preprocess_tree(src_root, src_buf, opts)
-	local dst_info = opts.dst_info or ts_utils.preprocess_tree(dst_root, dst_buf, opts)
+	local s2d, d2s = {}, {}
 
-	local src_mapped = {}
-	local dst_mapped = {}
-	local src_to_dst = {}
-	local src_root_id = src_root:id()
-	local dst_root_id = dst_root:id()
+	local opts = _opts or {}
+	if opts.enable_function_prematch == true then
+		prematch_functions(src_info, dst_info, s2d, d2s, mappings)
+	end
 
-	-- Group nodes by their height in the tree
-	local function get_nodes_by_height(info)
-		local by_height = {}
-		for _, data in pairs(info) do
-			if not by_height[data.height] then
-				by_height[data.height] = {}
+	if init_mappings then
+		for _, m in ipairs(init_mappings) do
+			if not s2d[m.src] and not d2s[m.dst] then
+				s2d[m.src] = m.dst
+				d2s[m.dst] = m.src
+				table.insert(mappings, m)
 			end
-			table.insert(by_height[data.height], data)
-		end
-
-		for _, nodes in pairs(by_height) do
-			table.sort(nodes, compare_node_order)
-		end
-
-		return by_height
-	end
-	local src_by_height = get_nodes_by_height(src_info)
-	local dst_by_height = get_nodes_by_height(dst_info)
-
-	local function dst_parent_key(info)
-		local parent_id = info.parent_id
-		if not parent_id then
-			return 0
-		end
-		if parent_id == dst_root_id then
-			return dst_root_id
-		end
-		return parent_id
-	end
-
-	local function src_parent_key(info)
-		local parent_id = info.parent_id
-		if not parent_id then
-			return 0
-		end
-		if parent_id == src_root_id then
-			return dst_root_id
-		end
-		return src_to_dst[parent_id] or -1
-	end
-
-	-- Find the maximum height in both trees
-	local max_h = 0
-	for h in pairs(src_by_height) do
-		if h > max_h then
-			max_h = h
-		end
-	end
-	for h in pairs(dst_by_height) do
-		if h > max_h then
-			max_h = h
 		end
 	end
 
-	-- For each height, match nodes with the same hash and compatible mapped parent.
-	-- Parent buckets avoid O(k) scans through all same-hash candidates.
-	for h = max_h, 1, -1 do
-		local s_nodes = src_by_height[h] or {}
-		local d_nodes = dst_by_height[h] or {}
+	local src_by_h, src_heights = build_height_queue(src_info)
+	local dst_by_h, dst_heights = build_height_queue(dst_info)
 
-		local dst_by_hash_parent = {}
-		for _, d in ipairs(d_nodes) do
-			if not dst_mapped[d.id] then
-				local hash_buckets = dst_by_hash_parent[d.hash]
-				if not hash_buckets then
-					hash_buckets = {}
-					dst_by_hash_parent[d.hash] = hash_buckets
-				end
+	local all_heights_set = {}
+	for _, h in ipairs(src_heights) do
+		all_heights_set[h] = true
+	end
+	for _, h in ipairs(dst_heights) do
+		all_heights_set[h] = true
+	end
+	local all_heights = {}
+	for h in pairs(all_heights_set) do
+		table.insert(all_heights, h)
+	end
+	table.sort(all_heights, function(a, b)
+		return a > b
+	end)
 
-				local pkey = dst_parent_key(d)
-				local queue = hash_buckets[pkey]
-				if not queue then
-					queue = { head = 1, items = {} }
-					hash_buckets[pkey] = queue
-				end
-				local items = queue.items
-				items[#items + 1] = d
+	local src_open = {}
+	local dst_open = {}
+
+	for _, h in ipairs(src_heights) do
+		for _, id in ipairs(src_by_h[h]) do
+			src_open[h] = src_open[h] or {}
+			table.insert(src_open[h], id)
+		end
+	end
+	for _, h in ipairs(dst_heights) do
+		for _, id in ipairs(dst_by_h[h]) do
+			dst_open[h] = dst_open[h] or {}
+			table.insert(dst_open[h], id)
+		end
+	end
+
+	local ambiguous = {}
+
+	for _, h in ipairs(all_heights) do
+		local sids = src_open[h] or {}
+		local dids = dst_open[h] or {}
+		if #sids == 0 or #dids == 0 then
+			goto continue_h
+		end
+
+		local src_by_hash = {}
+		for _, sid in ipairs(sids) do
+			if not s2d[sid] then
+				local hsh = src_info[sid].hash
+				src_by_hash[hsh] = src_by_hash[hsh] or {}
+				table.insert(src_by_hash[hsh], sid)
 			end
 		end
 
-		for _, s in ipairs(s_nodes) do
-			if not src_mapped[s.id] then
-				local pkey = src_parent_key(s)
-				if pkey ~= -1 then
-					local hash_buckets = dst_by_hash_parent[s.hash]
-					local queue = hash_buckets and hash_buckets[pkey] or nil
-					if queue then
-						local head = queue.head
-						local items = queue.items
-						local d = items[head]
-						if d then
-							queue.head = head + 1
-							table.insert(mappings, { src = s.id, dst = d.id })
-							src_mapped[s.id] = true
-							dst_mapped[d.id] = true
-							src_to_dst[s.id] = d.id
+		local dst_by_hash = {}
+		for _, did in ipairs(dids) do
+			if not d2s[did] then
+				local hsh = dst_info[did].hash
+				if src_by_hash[hsh] then
+					dst_by_hash[hsh] = dst_by_hash[hsh] or {}
+					table.insert(dst_by_hash[hsh], did)
+				end
+			end
+		end
+
+		local sorted_hashes = {}
+		for hsh in pairs(src_by_hash) do
+			table.insert(sorted_hashes, hsh)
+		end
+		table.sort(sorted_hashes)
+
+		for _, hsh in ipairs(sorted_hashes) do
+			local srcs = src_by_hash[hsh]
+			local dsts = dst_by_hash[hsh]
+			if not dsts then
+				for _, sid in ipairs(srcs) do
+					if not s2d[sid] then
+						local si = src_info[sid]
+						if si.node then
+							for child in si.node:iter_children() do
+								local cid = child:id()
+								if src_info[cid] and src_info[cid].height >= MIN_HEIGHT then
+									src_open[src_info[cid].height] = src_open[src_info[cid].height] or {}
+									table.insert(src_open[src_info[cid].height], cid)
+								end
+							end
 						end
 					end
+				end
+			elseif #srcs == 1 and #dsts == 1 then
+				local sid = srcs[1]
+				local did = dsts[1]
+				if not s2d[sid] and not d2s[did] then
+					if container_eligible(sid, did, src_info, dst_info, s2d) then
+						add_mapping_recursively(
+							src_info[sid].node,
+							dst_info[did].node,
+							src_info,
+							dst_info,
+							s2d,
+							d2s,
+							mappings
+						)
+					else
+						local si = src_info[sid]
+						local di = dst_info[did]
+						if si and si.node then
+							for child in si.node:iter_children() do
+								local cid = child:id()
+								if src_info[cid] and src_info[cid].height >= MIN_HEIGHT then
+									src_open[src_info[cid].height] = src_open[src_info[cid].height] or {}
+									table.insert(src_open[src_info[cid].height], cid)
+								end
+							end
+						end
+						if di and di.node then
+							for child in di.node:iter_children() do
+								local cid = child:id()
+								if dst_info[cid] and dst_info[cid].height >= MIN_HEIGHT then
+									dst_open[dst_info[cid].height] = dst_open[dst_info[cid].height] or {}
+									table.insert(dst_open[dst_info[cid].height], cid)
+								end
+							end
+						end
+					end
+				end
+			else
+				table.insert(ambiguous, { srcs = srcs, dsts = dsts, height = h })
+				for _, sid in ipairs(srcs) do
+					if not s2d[sid] then
+						local si = src_info[sid]
+						if si.node then
+							for child in si.node:iter_children() do
+								local cid = child:id()
+								if src_info[cid] and src_info[cid].height >= MIN_HEIGHT then
+									src_open[src_info[cid].height] = src_open[src_info[cid].height] or {}
+									table.insert(src_open[src_info[cid].height], cid)
+								end
+							end
+						end
+					end
+				end
+				for _, did in ipairs(dsts) do
+					if not d2s[did] then
+						local di = dst_info[did]
+						if di.node then
+							for child in di.node:iter_children() do
+								local cid = child:id()
+								if dst_info[cid] and dst_info[cid].height >= MIN_HEIGHT then
+									dst_open[dst_info[cid].height] = dst_open[dst_info[cid].height] or {}
+									table.insert(dst_open[dst_info[cid].height], cid)
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		::continue_h::
+	end
+
+	table.sort(ambiguous, function(a, b)
+		local sa = 0
+		for _, id in ipairs(a.srcs) do
+			sa = math.max(sa, src_info[id].size or 0)
+		end
+		local sb = 0
+		for _, id in ipairs(b.srcs) do
+			sb = math.max(sb, src_info[id].size or 0)
+		end
+		if sa == sb then
+			if a.srcs[1] and b.srcs[1] then
+				return node_pos_lt(a.srcs[1], b.srcs[1], src_info)
+			end
+		end
+		return sa > sb
+	end)
+
+	for _, group in ipairs(ambiguous) do
+		local pairs_list = {}
+		for _, sid in ipairs(group.srcs) do
+			for _, did in ipairs(group.dsts) do
+				table.insert(pairs_list, { sid = sid, did = did, size = src_info[sid].size or 0 })
+			end
+		end
+		table.sort(pairs_list, function(a, b)
+			if a.size == b.size then
+				if a.sid == b.sid then
+					return node_pos_lt(a.did, b.did, dst_info)
+				end
+				return node_pos_lt(a.sid, b.sid, src_info)
+			end
+			return a.size > b.size
+		end)
+
+		for _, p in ipairs(pairs_list) do
+			if not s2d[p.sid] and not d2s[p.did] then
+				if container_eligible(p.sid, p.did, src_info, dst_info, s2d) then
+					add_mapping_recursively(
+						src_info[p.sid].node,
+						dst_info[p.did].node,
+						src_info,
+						dst_info,
+						s2d,
+						d2s,
+						mappings
+					)
 				end
 			end
 		end

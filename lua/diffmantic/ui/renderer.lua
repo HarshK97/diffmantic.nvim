@@ -1,5 +1,5 @@
 local signs = require("diffmantic.ui.signs")
-local filler = require("diffmantic.ui.filler")
+local hunk_utils = require("diffmantic.ui.hunks")
 
 local M = {}
 
@@ -81,6 +81,19 @@ local function overlaps_any(range, ranges)
 	return false
 end
 
+local function collect_explicit_edit_ranges(actions)
+	local src_delete = {}
+	local dst_insert = {}
+	for _, action in ipairs(actions or {}) do
+		if action.type == "insert" and action.dst then
+			table.insert(dst_insert, action.dst)
+		elseif action.type == "delete" and action.src then
+			table.insert(src_delete, action.src)
+		end
+	end
+	return src_delete, dst_insert
+end
+
 local function apply_virt(buf, ns, row, col, text, hl_group, pos)
 	if row == nil or not text then
 		return
@@ -125,6 +138,14 @@ local HUNK_STYLE = {
 	},
 }
 
+local RENAME_SUPPRESSED_NODE_TYPES = {
+	identifier = true,
+	field_identifier = true,
+	property_identifier = true,
+	type_identifier = true,
+	namespace_identifier = true,
+}
+
 local function range_text(buf, range)
 	if not buf or not range then
 		return nil
@@ -147,7 +168,7 @@ local function range_text(buf, range)
 	return line:sub(start_col, end_col)
 end
 
-local function hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf)
+local function hunk_is_effective_non_rename(hunk, action, rename_pairs, src_buf, dst_buf)
 	if not hunk then
 		return false
 	end
@@ -162,19 +183,31 @@ local function hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf
 	if not src_text or not dst_text then
 		return true
 	end
-	return src_text ~= dst_text and rename_pairs[src_text] ~= dst_text
+	if src_text == dst_text then
+		return false
+	end
+	local meta = action and action.metadata or {}
+	if not RENAME_SUPPRESSED_NODE_TYPES[meta.node_type] then
+		return true
+	end
+	return rename_pairs[src_text] ~= dst_text
 end
 
-local function effective_update_hunks(action, src_buf, dst_buf)
+function M.effective_update_hunks(action, src_buf, dst_buf)
 	local analysis = action and action.analysis or nil
 	local hunks = analysis and analysis.hunks or nil
 	if not hunks or #hunks == 0 then
 		return {}
 	end
+	local normalized = hunk_utils.normalize_list(hunks, src_buf, dst_buf)
+	analysis.hunks = normalized
+	if #normalized == 0 then
+		return {}
+	end
 	local rename_pairs = analysis.rename_pairs or {}
 	local effective = {}
-	for _, hunk in ipairs(hunks) do
-		if hunk_is_effective_non_rename(hunk, rename_pairs, src_buf, dst_buf) then
+	for _, hunk in ipairs(normalized) do
+		if hunk_is_effective_non_rename(hunk, action, rename_pairs, src_buf, dst_buf) then
 			table.insert(effective, hunk)
 		end
 	end
@@ -196,10 +229,8 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 	local dst_sign_rows = {}
 	local src_move_ranges = {}
 	local dst_move_ranges = {}
-	local src_fillers, dst_fillers = filler.compute(actions, src_buf, dst_buf, opts)
-
-	filler.apply(src_buf, ns, src_fillers)
-	filler.apply(dst_buf, ns, dst_fillers)
+	local src_delete_ranges, dst_insert_ranges = collect_explicit_edit_ranges(actions)
+	local src_fillers, dst_fillers = {}, {}
 
 	for _, action in ipairs(actions) do
 		if action.type == "move" then
@@ -221,7 +252,7 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 			local style = base_style
 
 			if action.type == "update" then
-				local effective_hunks = effective_update_hunks(action, src_buf, dst_buf)
+				local effective_hunks = M.effective_update_hunks(action, src_buf, dst_buf)
 				if #effective_hunks == 0 then
 					goto continue
 				end
@@ -231,10 +262,15 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 					if hunk.render_as_change then
 						hstyle = HUNK_STYLE.change
 					end
+					if hunk.kind == "insert" and hunk.dst and overlaps_any(hunk.dst, dst_insert_ranges) then
+						goto continue_hunk
+					end
+					if hunk.kind == "delete" and hunk.src and overlaps_any(hunk.src, src_delete_ranges) then
+						goto continue_hunk
+					end
 					if hunk.src and hstyle.src_hl then
 						apply_span(src_buf, ns, hunk.src, hstyle.src_hl)
 						if hstyle.src_hl == "DiffmanticChange" and overlaps_any(hunk.src, src_move_ranges) then
-							-- Add a foreground/underline accent so updates stay visible over moved regions.
 							apply_span(src_buf, ns, hunk.src, "DiffmanticChangeAccent")
 						end
 						apply_sign(src_buf, ns, hunk.src.start_row, hstyle.src_sign, hstyle.src_hl, src_sign_rows)
@@ -243,19 +279,18 @@ function M.render(src_buf, dst_buf, actions, ns, opts)
 					if hunk.dst and hstyle.dst_hl then
 						apply_span(dst_buf, ns, hunk.dst, hstyle.dst_hl)
 						if hstyle.dst_hl == "DiffmanticChange" and overlaps_any(hunk.dst, dst_move_ranges) then
-							-- Add a foreground/underline accent so updates stay visible over moved regions.
 							apply_span(dst_buf, ns, hunk.dst, "DiffmanticChangeAccent")
 						end
 						apply_sign(dst_buf, ns, hunk.dst.start_row, hstyle.dst_sign, hstyle.dst_hl, dst_sign_rows)
 						rendered_hunk = true
 					end
+					::continue_hunk::
 				end
 				if not rendered_hunk then
 					goto continue
 				end
 			else
 				if (action.type == "insert" or action.type == "delete") and meta.render_as_change then
-					-- render_as_change inserts/deletes are represented by update hunks only.
 					goto continue
 				end
 				if src then

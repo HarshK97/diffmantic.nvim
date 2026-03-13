@@ -1,80 +1,284 @@
+
 local M = {}
-local semantic = require("diffmantic.core.semantic")
-local roles = require("diffmantic.core.roles")
-local analysis = require("diffmantic.core.analysis")
 
-local LITERAL_MEMBER_NODE_TYPES = {
-	pair = true,
-	keyed_element = true,
-	property_signature = true,
-	shorthand_property_identifier = true,
-}
+local MIN_MOVE_SIZE = 3
 
-local function range_text(buf, range)
-	if not buf or not range then
-		return nil
-	end
-	if range.start_row == nil or range.end_row == nil or range.start_col == nil or range.end_col == nil then
-		return nil
-	end
-	if range.start_row ~= range.end_row then
-		return nil
-	end
-	local line = vim.api.nvim_buf_get_lines(buf, range.start_row, range.start_row + 1, false)[1] or ""
-	if line == "" then
-		return nil
-	end
-	local start_col = range.start_col + 1
-	local end_col = range.end_col
-	if end_col < start_col then
-		return nil
-	end
-	return line:sub(start_col, end_col)
+local function is_update_blocked(si, info)
+	return false
 end
 
-local function action_pair_key(action)
-	if action and action.src_node and action.dst_node then
-		return action.src_node:id() .. ":" .. action.dst_node:id()
+local MOVE_EMIT_TYPES = {
+	function_definition = true,
+	method_definition = true,
+	function_declaration = true,
+	function_item = true,
+	local_function = true,
+	class_declaration = true,
+	class_specifier = true,
+	struct_specifier = true,
+	enum_specifier = true,
+	interface_declaration = true,
+	type_declaration = true,
+	type_alias_declaration = true,
+}
+
+local FUNCTION_CONTAINER_TYPES = {
+	function_definition = true,
+	method_definition = true,
+	function_declaration = true,
+	function_item = true,
+	local_function = true,
+	function_expression = true,
+	arrow_function = true,
+}
+
+local function is_descendant_or_same(id, ancestor_id, info)
+	local cur = id
+	while cur do
+		if cur == ancestor_id then
+			return true
+		end
+		local entry = info[cur]
+		cur = entry and entry.parent_id or nil
 	end
-	if action and action.src and action.dst then
-		return table.concat({
-			tostring(action.src.start_row),
-			tostring(action.src.start_col),
-			tostring(action.src.end_row),
-			tostring(action.src.end_col),
-			tostring(action.dst.start_row),
-			tostring(action.dst.start_col),
-			tostring(action.dst.end_row),
-			tostring(action.dst.end_col),
-		}, ":")
+	return false
+end
+
+local function nearest_call_expression(id, info)
+	local cur = id
+	while cur do
+		local entry = info[cur]
+		if not entry then
+			return nil
+		end
+		if entry.type == "call_expression" then
+			return cur
+		end
+		cur = entry.parent_id
 	end
 	return nil
 end
 
-local function has_effective_update_hunks(action, src_buf, dst_buf)
-	local action_analysis = action and action.analysis or nil
-	local hunks = action_analysis and action_analysis.hunks or nil
-	if not hunks or #hunks == 0 then
-		return false
+local function call_callee_id(call_id, info)
+	local call = info[call_id]
+	if not call or not call.node then
+		return nil
+	end
+	for child in call.node:iter_children() do
+		local cid = child:id()
+		local cinfo = info[cid]
+		if cinfo and child:named() then
+			if cinfo.type ~= "argument_list" then
+				return cid
+			end
+		end
+	end
+	return nil
+end
+
+local function call_arg_count(call_id, info)
+	local call = info[call_id]
+	if not call or not call.node then
+		return nil
+	end
+	for child in call.node:iter_children() do
+		local cid = child:id()
+		local cinfo = info[cid]
+		if cinfo and cinfo.type == "argument_list" and cinfo.node then
+			local count = 0
+			for arg in cinfo.node:iter_children() do
+				if arg:named() and info[arg:id()] then
+					count = count + 1
+				end
+			end
+			return count
+		end
+	end
+	return nil
+end
+
+local function call_callee_arity_compatible(sid, did, src_info, dst_info)
+	local src_call = nearest_call_expression(sid, src_info)
+	local dst_call = nearest_call_expression(did, dst_info)
+	if not src_call or not dst_call then
+		return true
 	end
 
-	local rename_pairs = action_analysis.rename_pairs or {}
-	for _, hunk in ipairs(hunks) do
-		if hunk.kind == "insert" or hunk.kind == "delete" then
-			return true
+	local src_callee = call_callee_id(src_call, src_info)
+	local dst_callee = call_callee_id(dst_call, dst_info)
+	if not src_callee or not dst_callee then
+		return true
+	end
+
+	if not is_descendant_or_same(sid, src_callee, src_info) or not is_descendant_or_same(did, dst_callee, dst_info) then
+		return true
+	end
+
+	local src_args = call_arg_count(src_call, src_info)
+	local dst_args = call_arg_count(dst_call, dst_info)
+	if src_args and dst_args and src_args ~= dst_args then
+		return false
+	end
+	return true
+end
+
+
+local function build_maps(mappings)
+	local s2d, d2s = {}, {}
+	for _, m in ipairs(mappings) do
+		s2d[m.src] = m.dst
+		d2s[m.dst] = m.src
+	end
+	return s2d, d2s
+end
+
+local function node_range(node)
+	if not node then return nil end
+	local ok, sr, sc, er, ec = pcall(node.range, node)
+	if not ok then return nil end
+	return { start_row = sr, start_col = sc, end_row = er, end_col = ec }
+end
+
+local function node_label(info_entry, buf)
+	if not info_entry then return "" end
+	if info_entry.label and info_entry.label ~= "" then return info_entry.label end
+	if info_entry.node and buf then
+		local ok, txt = pcall(vim.treesitter.get_node_text, info_entry.node, buf)
+		if ok and txt then
+			local first = txt:match("^[^\n]*") or ""
+			if #first > 80 then first = first:sub(1, 80) .. "…" end
+			return first
 		end
-		if hunk.kind == "change" then
-			local src_text = range_text(src_buf, hunk.src)
-			local dst_text = range_text(dst_buf, hunk.dst)
-			if not src_text or not dst_text then
-				return true
+	end
+	return ""
+end
+
+local function effective_label(info_entry, buf)
+	if not info_entry then
+		return ""
+	end
+	if info_entry.label and info_entry.label ~= "" then
+		return info_entry.label
+	end
+	if info_entry.node and buf then
+		local ok, txt = pcall(vim.treesitter.get_node_text, info_entry.node, buf)
+		if ok and txt then
+			local first = txt:match("^[^\n]*") or ""
+			return vim.trim(first)
+		end
+	end
+	return ""
+end
+
+local function node_text(node, buf)
+	if not node or not buf then
+		return ""
+	end
+	local ok, txt = pcall(vim.treesitter.get_node_text, node, buf)
+	if not ok or not txt then
+		return ""
+	end
+	return vim.trim(txt)
+end
+
+local function pair_key_text(node, buf)
+	if not node then
+		return ""
+	end
+	for child in node:iter_children() do
+		local ok_named, is_named = pcall(child.named, child)
+		if ok_named and is_named then
+			local txt = node_text(child, buf)
+			if txt ~= "" then
+				return txt
 			end
-			if src_text ~= dst_text and rename_pairs[src_text] ~= dst_text then
-				return true
-			end
+		end
+	end
+	return ""
+end
+
+local function pair_value_node(node, info)
+	if not node then
+		return nil
+	end
+	local named = {}
+	for child in node:iter_children() do
+		local ok_named, is_named = pcall(child.named, child)
+		if ok_named and is_named and info[child:id()] then
+			table.insert(named, child)
+		end
+	end
+	return named[2]
+end
+
+local function property_key_text(info_entry, buf)
+	if not info_entry or not info_entry.node then
+		return ""
+	end
+	if info_entry.type == "pair" then
+		return pair_key_text(info_entry.node, buf)
+	end
+	return node_text(info_entry.node, buf)
+end
+
+local function is_leaf_info(info_entry)
+	if not info_entry then
+		return false
+	end
+	if info_entry.size == 1 then
+		return true
+	end
+	if info_entry.node then
+		local ok, cnt = pcall(info_entry.node.named_child_count, info_entry.node)
+		if ok and cnt == 0 then
+			return true
 		end
 	end
 	return false
+end
+
+local function is_top_level_like(id, info, root_id)
+	local entry = info[id]
+	if not entry then
+		return false
+	end
+	if entry.parent_id == root_id then
+		return true
+	end
+	local p = entry.parent_id and info[entry.parent_id] or nil
+	return p and p.parent_id == root_id or false
+end
+
+local function should_emit_move_type(type_)
+	return MOVE_EMIT_TYPES[type_] == true
+end
+
+local function nearest_function_container(id, info)
+	local cur = info[id]
+	while cur and cur.parent_id do
+		local p = info[cur.parent_id]
+		if not p then
+			return nil
+		end
+		if FUNCTION_CONTAINER_TYPES[p.type] then
+			return cur.parent_id
+		end
+		cur = p
+	end
+	return nil
+end
+
+local function should_emit_named_leaf_edit(info_entry)
+	if not info_entry or not info_entry.node then
+		return false
+	end
+	if (info_entry.size or 0) > 1 then
+		return false
+	end
+	if not info_entry.node:named() then
+		return false
+	end
+	return true
 end
 
 local function range_contains(outer, inner)
@@ -99,1125 +303,1346 @@ local function range_contains(outer, inner)
 	return true
 end
 
-local function ranges_equal(a, b)
-	if not a or not b then
+local function range_span(range)
+	if not range then
+		return 0
+	end
+	local sr = range.start_row or 0
+	local er = range.end_row or sr
+	return math.max(1, (er - sr) + 1)
+end
+
+local function bfs_order(root, dst_info)
+	local order = {}
+	local queue = { root:id() }
+	local head  = 1
+	while head <= #queue do
+		local id = queue[head]; head = head + 1
+		table.insert(order, id)
+		local di = dst_info[id]
+		if di and di.node then
+			for child in di.node:iter_children() do
+				local cid = child:id()
+				if dst_info[cid] then table.insert(queue, cid) end
+			end
+		end
+	end
+	return order
+end
+
+local function post_order(root, src_info)
+	local order = {}
+	local function visit(id)
+		local si = src_info[id]
+		if not si or not si.node then return end
+		for child in si.node:iter_children() do
+			local cid = child:id()
+			if src_info[cid] then visit(cid) end
+		end
+		table.insert(order, id)
+	end
+	visit(root:id())
+	return order
+end
+
+local function child_positions(parent_id, info)
+	local pos  = {}
+	local list = {}
+	local p = info[parent_id]
+	if not p or not p.node then return pos, list end
+	local i = 0
+	for child in p.node:iter_children() do
+		local cid = child:id()
+		if info[cid] then
+			i = i + 1
+			pos[cid] = i
+			table.insert(list, cid)
+		end
+	end
+	return pos, list
+end
+
+local function mapped_prev_next(id, parent_id, info, peer_map)
+	local p = info[parent_id]
+	if not p or not p.node then
+		return nil, nil
+	end
+
+	local mapped_children = {}
+	for child in p.node:iter_children() do
+		local cid = child:id()
+		if info[cid] and peer_map[cid] then
+			table.insert(mapped_children, cid)
+		end
+	end
+
+	for i, cid in ipairs(mapped_children) do
+		if cid == id then
+			return mapped_children[i - 1], mapped_children[i + 1]
+		end
+	end
+	return nil, nil
+end
+
+local function has_stable_mapped_neighbors(sid, did, src_info, dst_info, s2d, d2s)
+	local si = src_info[sid]
+	local di = dst_info[did]
+	if not si or not di then
 		return false
 	end
-	return a.start_row == b.start_row
-		and a.start_col == b.start_col
-		and a.end_row == b.end_row
-		and a.end_col == b.end_col
+	if not si.parent_id or not di.parent_id then
+		return false
+	end
+	if s2d[si.parent_id] ~= di.parent_id then
+		return false
+	end
+
+	local sprev, snext = mapped_prev_next(sid, si.parent_id, src_info, s2d)
+	local dprev, dnext = mapped_prev_next(did, di.parent_id, dst_info, d2s)
+
+	local prev_ok = (sprev == nil and dprev == nil) or (sprev ~= nil and dprev ~= nil and s2d[sprev] == dprev)
+	local next_ok = (snext == nil and dnext == nil) or (snext ~= nil and dnext ~= nil and s2d[snext] == dnext)
+	return prev_ok and next_ok
 end
 
-local function ranges_related(a, b)
-	return ranges_equal(a, b) or range_contains(a, b) or range_contains(b, a)
+local function allow_unmapped_field_decl_parent(si, di, src_info, dst_info, s2d)
+	if not si or not di then
+		return false
+	end
+	if si.type ~= "field_identifier" or di.type ~= "field_identifier" then
+		return false
+	end
+	local spid = si.parent_id
+	local dpid = di.parent_id
+	if not spid or not dpid then
+		return false
+	end
+	local sp = src_info[spid]
+	local dp = dst_info[dpid]
+	if not sp or not dp then
+		return false
+	end
+	if sp.type ~= "field_declaration" or dp.type ~= "field_declaration" then
+		return false
+	end
+	local sgpid = sp.parent_id
+	local dgpid = dp.parent_id
+	if not sgpid or not dgpid then
+		return false
+	end
+	return s2d[sgpid] == dgpid
 end
 
-local TEMP_RESULT_DECL_NODE_TYPES = {
-	lexical_declaration = true,
-	short_var_declaration = true,
-	init_declarator = true,
-	variable_declaration = true,
-	local_variable_declaration = true,
+local function lis_membership(seq, displacement)
+	local n = #seq
+	if n == 0 then return {} end
+
+	local dp = {}
+	for i = 1, n do dp[i] = 1 end
+	for i = 2, n do
+		for j = 1, i - 1 do
+			if seq[j] < seq[i] then
+				dp[i] = math.max(dp[i], dp[j] + 1)
+			end
+		end
+	end
+
+	local max_len = 0
+	for i = 1, n do max_len = math.max(max_len, dp[i]) end
+
+	local in_lis = {}
+	local cur = max_len
+	local prev_val = math.huge
+	for i = n, 1, -1 do
+		if dp[i] == cur and seq[i] < prev_val then
+			if displacement then
+				local best_j = i
+				for j = i - 1, 1, -1 do
+					if dp[j] == cur and seq[j] < prev_val and seq[j] <= seq[best_j] then
+						if (displacement[j] or 0) < (displacement[best_j] or 0) then
+							best_j = j
+						end
+					end
+				end
+				if best_j ~= i and dp[best_j] == cur and seq[best_j] < prev_val then
+					in_lis[best_j] = true
+					prev_val = seq[best_j]
+					cur = cur - 1
+					goto continue_lis
+				end
+			end
+			in_lis[i] = true
+			prev_val = seq[i]
+			cur = cur - 1
+		end
+		::continue_lis::
+	end
+	return in_lis
+end
+
+local function collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d, src_buf, dst_buf)
+	local delete_idxs = {}
+	local insert_idxs = {}
+	for i, action in ipairs(actions) do
+		if action.type == "delete" and action.src_node then
+			local sid = action.src_node:id()
+			local si = src_info[sid]
+			if si and si.type == "shorthand_property_identifier" then
+				table.insert(delete_idxs, i)
+			end
+		elseif action.type == "insert" and action.dst_node then
+			local did = action.dst_node:id()
+			local di = dst_info[did]
+			if di and di.type == "pair" then
+				table.insert(insert_idxs, i)
+			end
+		end
+	end
+
+	if #delete_idxs == 0 or #insert_idxs == 0 then
+		return actions
+	end
+
+	local used_insert = {}
+	local drop = {}
+	local appended = {}
+
+	for _, del_idx in ipairs(delete_idxs) do
+		local del_action = actions[del_idx]
+		local sid = del_action.src_node and del_action.src_node:id() or nil
+		local si = sid and src_info[sid] or nil
+		if not si then
+			goto continue_delete
+		end
+
+		local src_key = node_text(del_action.src_node, src_buf)
+		if src_key == "" then
+			goto continue_delete
+		end
+		local mapped_parent = si.parent_id and s2d[si.parent_id] or nil
+
+		local best_idx = nil
+		local best_dist = nil
+		for _, ins_idx in ipairs(insert_idxs) do
+			if used_insert[ins_idx] then
+				goto continue_insert
+			end
+
+			local ins_action = actions[ins_idx]
+			local did = ins_action.dst_node and ins_action.dst_node:id() or nil
+			local di = did and dst_info[did] or nil
+			if not di then
+				goto continue_insert
+			end
+			if mapped_parent and di.parent_id ~= mapped_parent then
+				goto continue_insert
+			end
+
+			local dst_key = pair_key_text(ins_action.dst_node, dst_buf)
+			if dst_key ~= src_key then
+				goto continue_insert
+			end
+
+			local srow = del_action.src and del_action.src.start_row or 0
+			local drow = ins_action.dst and ins_action.dst.start_row or 0
+			local dist = math.abs(srow - drow)
+			if not best_idx or dist < best_dist then
+				best_idx = ins_idx
+				best_dist = dist
+			end
+
+			::continue_insert::
+		end
+
+		if best_idx then
+			local ins_action = actions[best_idx]
+			local did = ins_action.dst_node and ins_action.dst_node:id() or nil
+			local di = did and dst_info[did] or nil
+
+			used_insert[best_idx] = true
+			drop[del_idx] = true
+			drop[best_idx] = true
+
+			table.insert(appended, {
+				type = "update",
+				src = del_action.src,
+				dst = ins_action.dst,
+				src_node = del_action.src_node,
+				dst_node = ins_action.dst_node,
+				metadata = {
+					node_type = "pair",
+					old_name = node_label(si, src_buf),
+					new_name = node_label(di, dst_buf),
+					from_line = (del_action.src and (del_action.src.start_row + 1))
+						or (del_action.metadata and del_action.metadata.from_line)
+						or nil,
+					to_line = (ins_action.dst and (ins_action.dst.start_row + 1))
+						or (ins_action.metadata and ins_action.metadata.to_line)
+						or (ins_action.metadata and ins_action.metadata.from_line)
+						or nil,
+				},
+			})
+		end
+
+		::continue_delete::
+	end
+
+	if next(drop) == nil then
+		return actions
+	end
+
+	local filtered = {}
+	for i, action in ipairs(actions) do
+		if not drop[i] then
+			table.insert(filtered, action)
+		end
+	end
+	for _, action in ipairs(appended) do
+		table.insert(filtered, action)
+	end
+
+	return filtered
+end
+
+local function collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2s, src_buf, dst_buf)
+	local function is_source_property(info_entry)
+		return info_entry and (info_entry.type == "shorthand_property_identifier" or info_entry.type == "pair")
+	end
+
+	local function build_dst_pair_index()
+		local index = {}
+		for did, di in pairs(dst_info or {}) do
+			if di and di.type == "pair" and di.parent_id then
+				local key = property_key_text(di, dst_buf)
+				if key ~= "" then
+					index[di.parent_id] = index[di.parent_id] or {}
+					index[di.parent_id][key] = index[di.parent_id][key] or {}
+					table.insert(index[di.parent_id][key], did)
+				end
+			end
+		end
+		return index
+	end
+
+	local insert_by_node = {}
+	local delete_by_node = {}
+	local update_by_dst = {}
+	for idx, action in ipairs(actions or {}) do
+		if action.type == "insert" and action.dst_node then
+			local did = action.dst_node:id()
+			insert_by_node[did] = idx
+		elseif action.type == "delete" and action.src_node then
+			local sid = action.src_node:id()
+			delete_by_node[sid] = idx
+		elseif action.type == "update" and action.dst_node then
+			local did = action.dst_node:id()
+			update_by_dst[did] = update_by_dst[did] or {}
+			table.insert(update_by_dst[did], idx)
+		end
+	end
+
+	local drop = {}
+	local appended = {}
+	local used_dst = {}
+	local dst_pair_index = build_dst_pair_index()
+
+	for sid, si in pairs(src_info or {}) do
+		if not is_source_property(si) or s2d[sid] then
+			goto continue_src
+		end
+		local mapped_parent = si.parent_id and s2d[si.parent_id] or nil
+		if not mapped_parent then
+			goto continue_src
+		end
+
+		local src_key = property_key_text(si, src_buf)
+		if src_key == "" then
+			goto continue_src
+		end
+
+		local best_di = nil
+		local best_dist = nil
+		local candidates = dst_pair_index[mapped_parent] and dst_pair_index[mapped_parent][src_key] or nil
+		for _, did in ipairs(candidates or {}) do
+			local di = dst_info[did]
+			if used_dst[did] or d2s[did] then
+				goto continue_candidate
+			end
+			local dist = math.abs((si.start_row or 0) - (di.start_row or 0))
+			if not best_di or dist < best_dist then
+				best_di = did
+				best_dist = dist
+			end
+			::continue_candidate::
+		end
+
+		if not best_di then
+			goto continue_src
+		end
+
+		local di = dst_info[best_di]
+		local src_range = node_range(si.node)
+		local dst_range = node_range(di.node)
+		if not src_range or not dst_range then
+			goto continue_src
+		end
+
+		local dst_value = pair_value_node(di.node, dst_info)
+		local dst_value_text = node_text(dst_value, dst_buf)
+		local dst_text = node_label(di, dst_buf)
+		if dst_text == "" and dst_value_text ~= "" then
+			dst_text = src_key .. ": " .. dst_value_text
+		end
+
+		local existing_insert = insert_by_node[best_di]
+		if existing_insert then
+			drop[existing_insert] = true
+		end
+		local existing_delete = delete_by_node[sid]
+		if existing_delete then
+			drop[existing_delete] = true
+		end
+		for _, idx in ipairs(update_by_dst[best_di] or {}) do
+			drop[idx] = true
+		end
+
+		table.insert(appended, {
+			type = "update",
+			src = src_range,
+			dst = dst_range,
+			src_node = si.node,
+			dst_node = di.node,
+			metadata = {
+				node_type = "pair",
+				old_name = node_label(si, src_buf),
+				new_name = dst_text,
+				from_line = src_range.start_row + 1,
+				to_line = dst_range.start_row + 1,
+			},
+		})
+		used_dst[best_di] = true
+
+		::continue_src::
+	end
+
+	if next(drop) == nil and #appended == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for idx, action in ipairs(actions or {}) do
+		if not drop[idx] then
+			table.insert(filtered, action)
+		end
+	end
+	for _, action in ipairs(appended) do
+		table.insert(filtered, action)
+	end
+	return filtered
+end
+
+local function build_children_index(info)
+	local out = {}
+	for id, entry in pairs(info or {}) do
+		local pid = entry.parent_id
+		if pid then
+			out[pid] = out[pid] or {}
+			table.insert(out[pid], id)
+		end
+	end
+	return out
+end
+
+local function descendants_fully_mapped(root_id, info, peer_map, children_by_parent)
+	local children = children_by_parent[root_id]
+	if not children or #children == 0 then
+		return false
+	end
+
+	local stack = {}
+	for _, cid in ipairs(children) do
+		table.insert(stack, cid)
+	end
+
+	local named_count = 0
+	local named_mapped = 0
+	while #stack > 0 do
+		local id = table.remove(stack)
+		local entry = info[id]
+		if entry and entry.node and entry.node:named() then
+			named_count = named_count + 1
+			if peer_map[id] then
+				named_mapped = named_mapped + 1
+			end
+		end
+		for _, cid in ipairs(children_by_parent[id] or {}) do
+			table.insert(stack, cid)
+		end
+	end
+
+	return named_count > 0 and named_mapped == named_count and named_mapped > 0
+end
+
+local function collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
+	local function is_wrapper_type(type_)
+		return type_ == "field" or type_ == "field_declaration" or type_ == "if_statement"
+	end
+
+	local src_children = build_children_index(src_info)
+	local dst_children = build_children_index(dst_info)
+	local drop = {}
+
+	for i, action in ipairs(actions) do
+		if action.type == "insert" and action.dst_node then
+			local did = action.dst_node:id()
+			local di = dst_info[did]
+			if di and is_wrapper_type(di.type) and descendants_fully_mapped(did, dst_info, d2s, dst_children) then
+				drop[i] = true
+			end
+		elseif action.type == "delete" and action.src_node then
+			local sid = action.src_node:id()
+			local si = src_info[sid]
+			if si and is_wrapper_type(si.type) and descendants_fully_mapped(sid, src_info, s2d, src_children) then
+				drop[i] = true
+			end
+		end
+	end
+
+	if next(drop) == nil then
+		return actions
+	end
+
+	local filtered = {}
+	for i, action in ipairs(actions) do
+		if not drop[i] then
+			table.insert(filtered, action)
+		end
+	end
+	return filtered
+end
+
+local LEAF_EDIT_TYPES = {
+	identifier = true,
+	field_identifier = true,
+	property_identifier = true,
+	type_identifier = true,
+	namespace_identifier = true,
+	number_literal = true,
+	string_literal = true,
+	char_literal = true,
 }
 
-local function line_text(buf, row)
-	if not buf or row == nil then
-		return nil
-	end
-	local lines = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)
-	return lines and lines[1] or nil
-end
+local function suppress_fragmented_updates(actions)
+	local delete_regions = {}
+	local insert_regions = {}
 
-local function action_side_text(action, buf, side)
-	if not action or not buf then
-		return nil
-	end
-	local node = side == "src" and action.src_node or action.dst_node
-	if node then
-		return vim.treesitter.get_node_text(node, buf)
-	end
-	local range = side == "src" and action.src or action.dst
-	return range_text(buf, range)
-end
-
-local function extract_assigned_identifier(text)
-	if not text or text == "" then
-		return nil
-	end
-	local id = text:match("^%s*[Cc]onst%s+([%a_][%w_]*)%s*=")
-		or text:match("^%s*[Ll]et%s+([%a_][%w_]*)%s*=")
-		or text:match("^%s*[Vv]ar%s+([%a_][%w_]*)%s*=")
-		or text:match("^%s*[Ll]ocal%s+([%a_][%w_]*)%s*=")
-		or text:match("^%s*([%a_][%w_]*)%s*:=")
-	if id then
-		return id
-	end
-	local lhs = text:match("^(.-)=")
-	if not lhs then
-		return nil
-	end
-	return lhs:match("([%a_][%w_]*)%s*$")
-end
-
-local function extract_return_identifier(text)
-	if not text or text == "" then
-		return nil
-	end
-	local expr = text:match("^%s*return%s+(.+)$")
-	if not expr then
-		return nil
-	end
-	local trimmed = expr:gsub("%s*;%s*$", ""):match("^%s*(.-)%s*$")
-	if not trimmed then
-		return nil
-	end
-	return trimmed:match("^%(*%s*([%a_][%w_]*)%s*%)?$")
-end
-
-local function mark_temp_result_refactor_overrides(actions_list, src_buf, dst_buf)
-	if not src_buf or not dst_buf then
-		return
+	for _, action in ipairs(actions or {}) do
+		local meta = action.metadata or {}
+		local node_type = meta.node_type
+		if action.type == "delete" and action.src and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(delete_regions, action.src)
+		elseif action.type == "insert" and action.dst and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(insert_regions, action.dst)
+		end
 	end
 
-	local function mark_insert_actions_for_rows(update_action, declared_name, decl_row, ret_row)
-		for _, action in ipairs(actions_list) do
-			if action.type == "insert" and action.dst and range_contains(update_action.dst, action.dst) then
-				local node_type = action.metadata and action.metadata.node_type or nil
-				if action.dst.start_row == decl_row and TEMP_RESULT_DECL_NODE_TYPES[node_type] then
-					local decl_text = action_side_text(action, dst_buf, "dst") or line_text(dst_buf, decl_row)
-					if extract_assigned_identifier(decl_text) == declared_name then
-						action.metadata = action.metadata or {}
-						action.metadata.render_as_change = true
-					end
-				elseif action.dst.start_row == ret_row and node_type == "return_statement" then
-					local ret_text = action_side_text(action, dst_buf, "dst") or line_text(dst_buf, ret_row)
-					if extract_return_identifier(ret_text) == declared_name then
-						action.metadata = action.metadata or {}
-						action.metadata.render_as_change = true
-					end
+	if #delete_regions == 0 or #insert_regions == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for _, action in ipairs(actions) do
+		if action.type == "update" and action.src and action.dst then
+			local in_delete = false
+			for _, region in ipairs(delete_regions) do
+				if range_contains(region, action.src) then
+					in_delete = true
+					break
 				end
 			end
-		end
-	end
 
-	for _, update_action in ipairs(actions_list) do
-		if update_action.type == "update" and update_action.dst then
-			local hunks = update_action.analysis and update_action.analysis.hunks or {}
-			for _, change_hunk in ipairs(hunks) do
-				if change_hunk.kind == "change" and change_hunk.src and change_hunk.dst then
-					local src_line = line_text(src_buf, change_hunk.src.start_row)
-					local dst_line = line_text(dst_buf, change_hunk.dst.start_row)
-					if src_line and dst_line and src_line:match("^%s*return%s+") then
-						local declared_name = extract_assigned_identifier(dst_line)
-						if declared_name then
-							local matched_insert = nil
-							for _, insert_hunk in ipairs(hunks) do
-								if
-									insert_hunk.kind == "insert"
-									and insert_hunk.dst
-									and insert_hunk.dst.start_row >= change_hunk.dst.start_row
-									and insert_hunk.dst.start_row <= change_hunk.dst.start_row + 2
-								then
-									local inserted_line = line_text(dst_buf, insert_hunk.dst.start_row)
-									if extract_return_identifier(inserted_line) == declared_name then
-										matched_insert = insert_hunk
-										break
-									end
-								end
-							end
-
-							if matched_insert then
-								matched_insert.render_as_change = true
-								mark_insert_actions_for_rows(
-									update_action,
-									declared_name,
-									change_hunk.dst.start_row,
-									matched_insert.dst.start_row
-								)
-							end
-						end
-					end
+			local in_insert = false
+			for _, region in ipairs(insert_regions) do
+				if range_contains(region, action.dst) then
+					in_insert = true
+					break
 				end
 			end
+
+			if in_delete or in_insert then
+				goto continue_action
+			end
 		end
+
+		table.insert(filtered, action)
+		::continue_action::
 	end
+
+	return filtered
 end
 
-local function mark_literal_member_render_overrides(actions_list)
-	local update_contexts = {}
-	for _, action in ipairs(actions_list) do
-		if action.type == "update" then
-			local context = {
-				action = action,
-				src = action.src,
-				dst = action.dst,
-				src_change_hunks = {},
-				dst_change_hunks = {},
-			}
-			local hunks = action.analysis and action.analysis.hunks or {}
-			for _, hunk in ipairs(hunks) do
-				if hunk.kind == "change" then
-					if hunk.src then
-						table.insert(context.src_change_hunks, hunk.src)
-					end
-					if hunk.dst then
-						table.insert(context.dst_change_hunks, hunk.dst)
+local function suppress_nested_leaf_edits(actions)
+	local delete_regions = {}
+	local insert_regions = {}
+
+	for _, action in ipairs(actions or {}) do
+		local meta = action.metadata or {}
+		local node_type = meta.node_type
+		if action.type == "delete" and action.src and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(delete_regions, action.src)
+		elseif action.type == "insert" and action.dst and not LEAF_EDIT_TYPES[node_type] then
+			table.insert(insert_regions, action.dst)
+		end
+	end
+
+	if #delete_regions == 0 and #insert_regions == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for _, action in ipairs(actions or {}) do
+		local drop = false
+		local meta = action.metadata or {}
+		local node_type = meta.node_type
+		if LEAF_EDIT_TYPES[node_type] then
+			if action.type == "delete" and action.src then
+				for _, region in ipairs(delete_regions) do
+					if range_contains(region, action.src) then
+						drop = true
+						break
 					end
 				end
-			end
-			table.insert(update_contexts, context)
-		end
-	end
-
-	local function overlaps_any(ranges, target)
-		if not target then
-			return false
-		end
-		for _, r in ipairs(ranges) do
-			if ranges_related(r, target) then
-				return true
-			end
-		end
-		return false
-	end
-
-	for _, action in ipairs(actions_list) do
-		if action.type == "insert" or action.type == "delete" then
-			local metadata = action.metadata or {}
-			if LITERAL_MEMBER_NODE_TYPES[metadata.node_type] then
-				local target = action.type == "insert" and action.dst or action.src
-				for _, context in ipairs(update_contexts) do
-					local container = action.type == "insert" and context.dst or context.src
-					local change_hunks = action.type == "insert" and context.dst_change_hunks or context.src_change_hunks
-					-- Key-aware policy: only override inserts/deletes that overlap replacement hunks.
-					if range_contains(container, target) and overlaps_any(change_hunks, target) then
-						action.metadata = action.metadata or {}
-						action.metadata.render_as_change = true
-						local hunks = context.action.analysis and context.action.analysis.hunks or {}
-						for _, hunk in ipairs(hunks) do
-							if action.type == "insert" and hunk.kind == "insert" and ranges_related(hunk.dst, action.dst) then
-								hunk.render_as_change = true
-							elseif action.type == "delete" and hunk.kind == "delete" and ranges_related(hunk.src, action.src) then
-								hunk.render_as_change = true
-							end
-						end
+			elseif action.type == "insert" and action.dst then
+				for _, region in ipairs(insert_regions) do
+					if range_contains(region, action.dst) then
+						drop = true
 						break
 					end
 				end
 			end
 		end
-	end
-end
 
-local function range_metadata(node)
-	if not node then
-		return nil
-	end
-	local sr, sc, er, ec = node:range()
-	return {
-		start_row = sr,
-		start_col = sc,
-		end_row = er,
-		end_col = ec,
-		start_line = sr + 1,
-		end_line = er + 1,
-	}
-end
-
-local function build_action(action_type, src_node, dst_node, extra)
-	local src = range_metadata(src_node)
-	local dst = range_metadata(dst_node)
-	local node = src_node or dst_node
-	local from_line = src and src.start_line or nil
-	local to_line = dst and dst.start_line or nil
-
-	local action = {
-		type = action_type,
-		src_node = src_node,
-		dst_node = dst_node,
-		src = src and vim.tbl_extend("force", {}, src, { text = nil }) or nil,
-		dst = dst and vim.tbl_extend("force", {}, dst, { text = nil }) or nil,
-		metadata = {
-			node_type = node and node:type() or nil,
-			old_name = nil,
-			new_name = nil,
-			from_line = from_line,
-			to_line = to_line,
-			suppressed_renames = nil,
-		},
-		analysis = nil,
-	}
-
-	if extra then
-		if extra.context then
-			action.context = extra.context
-		end
-		if extra.analysis then
-			action.analysis = extra.analysis
-		end
-		if extra.metadata then
-			action.metadata = vim.tbl_extend("force", action.metadata, extra.metadata)
-		end
-		action.metadata.old_name = extra.old_name or extra.from or action.metadata.old_name
-		action.metadata.new_name = extra.new_name or extra.to or action.metadata.new_name
-		action.metadata.from_line = extra.from_line or action.metadata.from_line
-		action.metadata.to_line = extra.to_line or action.metadata.to_line
-		action.metadata.node_type = extra.node_type or action.metadata.node_type
-		action.metadata.suppressed_renames = extra.suppressed_renames or action.metadata.suppressed_renames
-		if extra.context and extra.context.suppressed_usages then
-			action.metadata.suppressed_renames = extra.context.suppressed_usages
+		if not drop then
+			table.insert(filtered, action)
 		end
 	end
 
-	return action
+	return filtered
 end
 
-local function build_summary(actions_list)
-	local summary = {
-		counts = {
-			move = 0,
-			rename = 0,
-			rename_suppressed = 0,
-			update = 0,
-			insert = 0,
-			delete = 0,
-			total = #actions_list,
-		},
-		moves = {},
-		renames = {},
-		suppressed_renames = {},
-		updates = {},
-		inserts = {},
-		deletes = {},
-	}
+local function is_control_condition_expr(id, info)
+	local entry = info and info[id] or nil
+	if not entry or entry.type ~= "binary_expression" then
+		return false
+	end
+	local pid = entry.parent_id
+	local p = pid and info[pid] or nil
+	if not p then
+		return false
+	end
+	if p.type == "condition_clause" then
+		return true
+	end
+	if p.type == "for_statement" or p.type == "while_statement" then
+		return true
+	end
+	return false
+end
 
-	for _, action in ipairs(actions_list) do
-		local t = action.type
-		if summary.counts[t] ~= nil then
-			summary.counts[t] = summary.counts[t] + 1
+local function add_control_condition_updates(actions, mappings, src_info, dst_info, src_buf, dst_buf)
+	local seen_src = {}
+	for _, action in ipairs(actions or {}) do
+		if action.type == "update" and action.src_node then
+			seen_src[action.src_node:id()] = true
 		end
+	end
 
-		if t == "move" then
-			local metadata = action.metadata or {}
-			table.insert(summary.moves, {
-				node_type = metadata.node_type,
-				from_line = metadata.from_line,
-				to_line = metadata.to_line,
-				src_range = action.src,
-				dst_range = action.dst,
-			})
-		elseif t == "rename" then
-			local metadata = action.metadata or {}
-			local suppressed_usages = metadata.suppressed_renames or (action.context and action.context.suppressed_usages or {})
-			local suppressed_count = #suppressed_usages
-			summary.counts.rename_suppressed = summary.counts.rename_suppressed + suppressed_count
-
-			table.insert(summary.renames, {
-				node_type = metadata.node_type,
-				from = metadata.old_name,
-				to = metadata.new_name,
-				from_line = metadata.from_line,
-				to_line = metadata.to_line,
-				src_range = action.src,
-				dst_range = action.dst,
-				suppressed_usage_count = suppressed_count,
-			})
-
-			for _, usage in ipairs(suppressed_usages) do
-				local usage_meta = usage.metadata or {}
-				table.insert(summary.suppressed_renames, {
-					from = usage_meta.old_name,
-					to = usage_meta.new_name,
-					from_line = usage_meta.from_line,
-					to_line = usage_meta.to_line,
-					src_range = usage.src,
-					dst_range = usage.dst,
-					suppressed_by = {
-						from = metadata.old_name,
-						to = metadata.new_name,
-						from_line = metadata.from_line,
-						to_line = metadata.to_line,
-					},
-				})
+	for _, m in ipairs(mappings or {}) do
+		local sid = m.src
+		local did = m.dst
+		if not seen_src[sid] then
+			local si = src_info[sid]
+			local di = dst_info[did]
+			if si and di and si.type == di.type and is_control_condition_expr(sid, src_info) and is_control_condition_expr(did, dst_info) then
+				local src_text = node_text(si.node, src_buf)
+				local dst_text = node_text(di.node, dst_buf)
+				if src_text ~= "" and dst_text ~= "" and src_text ~= dst_text then
+					local src_range = node_range(si.node)
+					local dst_range = node_range(di.node)
+					table.insert(actions, {
+						type = "update",
+						src = src_range,
+						dst = dst_range,
+						src_node = si.node,
+						dst_node = di.node,
+						metadata = {
+							node_type = si.type,
+							old_name = src_text,
+							new_name = dst_text,
+							from_line = src_range and (src_range.start_row + 1) or nil,
+							to_line = dst_range and (dst_range.start_row + 1) or nil,
+							condition_update = true,
+						},
+					})
+					seen_src[sid] = true
+				end
 			end
-		elseif t == "update" then
-			local metadata = action.metadata or {}
-			table.insert(summary.updates, {
-				node_type = metadata.node_type,
-				from_line = metadata.from_line,
-				to_line = metadata.to_line,
-				src_range = action.src,
-				dst_range = action.dst,
-			})
-		elseif t == "insert" then
-			local metadata = action.metadata or {}
-			table.insert(summary.inserts, {
-				node_type = metadata.node_type,
-				line = metadata.to_line,
-				dst_range = action.dst,
-			})
-		elseif t == "delete" then
-			local metadata = action.metadata or {}
-			table.insert(summary.deletes, {
-				node_type = metadata.node_type,
-				line = metadata.from_line,
-				src_range = action.src,
-			})
 		end
 	end
 
-	return summary
+	return actions
 end
 
--- Generate edit actions from node mappings
--- Actions describe what changed: insert, delete, update, move, rename
+local function suppress_condition_nested_edits(actions)
+	local condition_pairs = {}
+	for _, action in ipairs(actions or {}) do
+		local meta = action.metadata or {}
+		if action.type == "update" and meta.condition_update and action.src and action.dst then
+			table.insert(condition_pairs, { src = action.src, dst = action.dst, action = action })
+		end
+	end
+
+	if #condition_pairs == 0 then
+		return actions
+	end
+
+	local filtered = {}
+	for _, action in ipairs(actions) do
+		local drop = false
+		if action.type == "insert" and action.dst then
+			for _, pair in ipairs(condition_pairs) do
+				if range_contains(pair.dst, action.dst) then
+					drop = true
+					break
+				end
+			end
+		elseif action.type == "delete" and action.src then
+			for _, pair in ipairs(condition_pairs) do
+				if range_contains(pair.src, action.src) then
+					drop = true
+					break
+				end
+			end
+		elseif action.type == "update" then
+			local meta = action.metadata or {}
+			if not meta.condition_update and action.src and action.dst then
+				for _, pair in ipairs(condition_pairs) do
+					if range_contains(pair.src, action.src) or range_contains(pair.dst, action.dst) then
+						drop = true
+						break
+					end
+				end
+			end
+		end
+
+		if not drop then
+			table.insert(filtered, action)
+		end
+	end
+
+	return filtered
+end
+
+local function add_assignment_replacements(actions, mappings, src_info, dst_info, src_buf, dst_buf, s2d)
+	local function assignment_lr_types(info_entry, info)
+		if not info_entry or not info_entry.node then
+			return nil, nil
+		end
+		local named = {}
+		for child in info_entry.node:iter_children() do
+			local ok_named, is_named = pcall(child.named, child)
+			if ok_named and is_named then
+				local cinfo = info[child:id()]
+				if cinfo then
+					table.insert(named, cinfo.type)
+				end
+			end
+		end
+		if #named < 2 then
+			return nil, nil
+		end
+		return named[1], named[#named]
+	end
+
+	local covered_src = {}
+	local covered_dst = {}
+	for _, action in ipairs(actions or {}) do
+		if action.src_node then
+			covered_src[action.src_node:id()] = true
+		end
+		if action.dst_node then
+			covered_dst[action.dst_node:id()] = true
+		end
+	end
+
+	for _, m in ipairs(mappings or {}) do
+		local sid = m.src
+		local did = m.dst
+		local si = src_info[sid]
+		local di = dst_info[did]
+		if not si or not di then
+			goto continue_mapping
+		end
+		if si.type ~= "assignment_expression" or di.type ~= "assignment_expression" then
+			goto continue_mapping
+		end
+
+		local rep_sid, rep_did = sid, did
+		local rep_si, rep_di = si, di
+		local spid = si.parent_id
+		local dpid = di.parent_id
+		local sp = spid and src_info[spid] or nil
+		local dp = dpid and dst_info[dpid] or nil
+		if sp and dp and sp.type == "expression_statement" and dp.type == "expression_statement" and s2d[spid] == dpid then
+			rep_sid, rep_did = spid, dpid
+			rep_si, rep_di = sp, dp
+		end
+
+		if covered_src[rep_sid] or covered_dst[rep_did] then
+			goto continue_mapping
+		end
+
+		local src_text = node_text(rep_si.node, src_buf)
+		local dst_text = node_text(rep_di.node, dst_buf)
+		if src_text == "" or dst_text == "" or src_text == dst_text then
+			goto continue_mapping
+		end
+
+		local src_lhs_type, src_rhs_type = assignment_lr_types(si, src_info)
+		local dst_lhs_type, dst_rhs_type = assignment_lr_types(di, dst_info)
+		local shape_changed = (src_lhs_type and dst_lhs_type and src_lhs_type ~= dst_lhs_type)
+			or (src_rhs_type and dst_rhs_type and src_rhs_type ~= dst_rhs_type)
+		if not shape_changed then
+			goto continue_mapping
+		end
+
+		local src_range = node_range(rep_si.node)
+		local dst_range = node_range(rep_di.node)
+		if not src_range or not dst_range then
+			goto continue_mapping
+		end
+
+		table.insert(actions, {
+			type = "delete",
+			src = src_range,
+			dst = nil,
+			src_node = rep_si.node,
+			dst_node = nil,
+			metadata = {
+				node_type = rep_si.type,
+				old_name = src_text,
+				from_line = src_range.start_row + 1,
+			},
+		})
+		table.insert(actions, {
+			type = "insert",
+			src = nil,
+			dst = dst_range,
+			src_node = nil,
+			dst_node = rep_di.node,
+			metadata = {
+				node_type = rep_di.type,
+				new_name = dst_text,
+				to_line = dst_range.start_row + 1,
+			},
+		})
+
+		covered_src[rep_sid] = true
+		covered_dst[rep_did] = true
+		::continue_mapping::
+	end
+
+	return actions
+end
+
+
 function M.generate_actions(src_root, dst_root, mappings, src_info, dst_info, opts)
 	opts = opts or {}
+	local src_buf = opts.src_buf
+	local dst_buf = opts.dst_buf
+
+	local s2d, d2s = build_maps(mappings)
+	local src_root_id = src_root:id()
+	local dst_root_id = dst_root:id()
+
 	local actions = {}
-	local timings = nil
-	local hrtime = nil
-	local src_has_parse_error = src_root and src_root.has_error and src_root:has_error() or false
-	local dst_has_parse_error = dst_root and dst_root.has_error and dst_root:has_error() or false
-	local has_parse_error = src_has_parse_error or dst_has_parse_error
-	if opts.timings then
-		timings = {}
-		if vim and vim.loop and vim.loop.hrtime then
-			hrtime = vim.loop.hrtime
-		end
-	end
 
-	local src_role_index = opts.src_role_index or nil
-	local dst_role_index = opts.dst_role_index or nil
-	local src_buf = opts.src_buf or nil
-	local dst_buf = opts.dst_buf or nil
-
-	local function start_timer()
-		if not hrtime then
-			return nil
-		end
-		return hrtime()
-	end
-
-	local function stop_timer(started_at, key)
-		if not timings or not started_at then
-			return
-		end
-		timings[key] = (hrtime() - started_at) / 1e6
-	end
-
-	local function enrich_update_actions_with_semantics(actions_list)
-		if not src_buf or not dst_buf then
-			return
-		end
-
-		for _, action in ipairs(actions_list) do
-			local src_node = action.src_node
-			local dst_node = action.dst_node
-			if action.type == "update" and src_node and dst_node then
-				local leaf_changes = semantic.find_leaf_changes(src_node, dst_node, src_buf, dst_buf, src_role_index, dst_role_index)
-				local rename_pairs = {}
-				for _, change in ipairs(leaf_changes) do
-					if
-						semantic.is_rename_identifier(change.src_node, src_role_index)
-						or semantic.is_rename_identifier(change.dst_node, dst_role_index)
-					then
-						rename_pairs[change.src_text] = change.dst_text
+	local dst_bfs = bfs_order(dst_root, dst_info)
+	for _, did in ipairs(dst_bfs) do
+		if d2s[did] then goto cont_ins end
+		local di = dst_info[did]
+		if not di then goto cont_ins end
+		local parent_did = di.parent_id
+		local dst_size = di.size or 1
+		local size_ok = dst_size > 1 and not LEAF_EDIT_TYPES[di.type]
+		if (not parent_did or d2s[parent_did]) and size_ok then
+			local emit_info = di
+			if di.type == "expression_statement" and di.node then
+				local children = {}
+				for child in di.node:iter_children() do
+					local cinfo = dst_info[child:id()]
+					if cinfo then
+						table.insert(children, cinfo)
 					end
 				end
-
-				action.analysis = {
-					leaf_changes = leaf_changes,
-					rename_pairs = rename_pairs,
-				}
+				if #children == 1 and children[1].type == "assignment_expression" and not d2s[children[1].node:id()] then
+					emit_info = children[1]
+				end
 			end
+			local range = node_range(emit_info.node)
+			table.insert(actions, {
+				type     = "insert",
+				src      = nil,
+				dst      = range,
+				src_node = nil,
+				dst_node = emit_info.node,
+				metadata = {
+					node_type = emit_info.type,
+					new_name  = node_label(emit_info, dst_buf),
+					to_line   = range and (range.start_row + 1) or nil,
+				},
+			})
 		end
+		::cont_ins::
 	end
 
-	local function emit_rename_actions(actions_list)
-		local renames = {}
-		local seen = {}
-		local is_buf_available = src_buf and dst_buf
+	local moved_all = {}   -- all nodes involved in a parent-change move
+	for _, m in ipairs(mappings) do
+		local sid = m.src
+		local did = m.dst
+		if sid == src_root_id then goto cont_mu end
 
-		local function pair_key(from_text, to_text)
-			return tostring(from_text) .. "\x1f" .. tostring(to_text)
-		end
+		local si = src_info[sid]
+		local di = dst_info[did]
+		if not si or not di then goto cont_mu end
 
-		local function push_rename(src_node, dst_node, from_text, to_text, context)
-			if not src_node or not dst_node or not from_text or not to_text then
-				return
-			end
-			if from_text == to_text then
-				return
-			end
-			local key = table.concat({
-				tostring(src_node:id()),
-				tostring(dst_node:id()),
-				from_text,
-				to_text,
-			}, ":")
-			if seen[key] then
-				return
-			end
-			seen[key] = true
-			table.insert(renames, build_action("rename", src_node, dst_node, {
-				from = from_text,
-				to = to_text,
-				context = context,
-			}))
-		end
-
-		local function is_decl_rename(src_node, dst_node)
-			local function is_class_name_node(node, role_index)
-				return roles.has_capture(node, role_index, "diff.class.name")
-			end
-
-			local function is_class_like_context(node, role_index)
-				local cur = node
-				while cur do
-					if roles.has_kind(cur, role_index, "class") then
-						return true
-					end
-					cur = cur:parent()
-				end
-				return false
-			end
-
-			local src_is_class_name = is_class_name_node(src_node, src_role_index)
-			local dst_is_class_name = is_class_name_node(dst_node, dst_role_index)
-			if
-				(not src_is_class_name and is_class_like_context(src_node, src_role_index))
-				or (not dst_is_class_name and is_class_like_context(dst_node, dst_role_index))
-			then
-				return false
-			end
-
-			return semantic.is_rename_identifier(src_node, src_role_index)
-				and semantic.is_rename_identifier(dst_node, dst_role_index)
-		end
-
-		local seed_pairs = {}
-		local function add_seed(from_text, to_text)
-			if from_text and to_text and from_text ~= to_text then
-				seed_pairs[pair_key(from_text, to_text)] = true
-			end
-		end
-
-		local function collect_param_identifiers(node, bufnr)
-			if not node or not bufnr then
-				return {}
-			end
-
-			local parameter_kinds = {
-				parameters = true,
-				parameter_list = true,
-				formal_parameters = true,
-			}
-
-			local function find_parameter_node(n)
-				if parameter_kinds[n:type()] then
-					return n
-				end
-				for child in n:iter_children() do
-					local found = find_parameter_node(child)
-					if found then
-						return found
+		local src_label = effective_label(si, src_buf)
+		local dst_label = effective_label(di, dst_buf)
+		local update_allowed = si.type == di.type
+			and not is_update_blocked(si, src_info)
+			and is_leaf_info(si)
+			and is_leaf_info(di)
+				and src_label ~= ""
+				and dst_label ~= ""
+				and src_label ~= dst_label
+				if update_allowed then
+					if si.parent_id and not s2d[si.parent_id] then
+						update_allowed = allow_unmapped_field_decl_parent(si, di, src_info, dst_info, s2d)
+					elseif di.parent_id and not d2s[di.parent_id] then
+						update_allowed = allow_unmapped_field_decl_parent(si, di, src_info, dst_info, s2d)
 					end
 				end
-				return nil
+				if update_allowed then
+					update_allowed = call_callee_arity_compatible(sid, did, src_info, dst_info)
+				end
+				if update_allowed then
+					local src_fc = nearest_function_container(sid, src_info)
+				local dst_fc = nearest_function_container(did, dst_info)
+				if (src_fc and not dst_fc) or (dst_fc and not src_fc) then
+					update_allowed = false
+				elseif src_fc and dst_fc and s2d[src_fc] ~= dst_fc then
+					update_allowed = false
+				end
 			end
-
-			local params_root = find_parameter_node(node)
-			if not params_root then
-				return {}
-			end
-
-			local out = {}
-			local function first_identifier(n)
-				if n:child_count() == 0 then
-					local t = n:type()
-					if t == "identifier" or t == "field_identifier" or t == "property_identifier" then
-						local text = vim.treesitter.get_node_text(n, bufnr)
-						if text and text:match("^[%a_][%w_]*$") then
-							return { node = n, text = text }
+			if update_allowed then
+				local sp = si.parent_id and src_info[si.parent_id] or nil
+				local dp = di.parent_id and dst_info[di.parent_id] or nil
+				if (sp and not dp) or (dp and not sp) then
+					update_allowed = false
+				elseif sp and dp then
+					if sp.type ~= dp.type then
+						update_allowed = false
+					else
+						local sgp = sp.parent_id and src_info[sp.parent_id] or nil
+						local dgp = dp.parent_id and dst_info[dp.parent_id] or nil
+						if (sgp and not dgp) or (dgp and not sgp) then
+							update_allowed = false
+						elseif sgp and dgp and sgp.type ~= dgp.type then
+							update_allowed = false
 						end
 					end
-					return nil
-				end
-				for child in n:iter_children() do
-					local found = first_identifier(child)
-					if found then
-						return found
-					end
-				end
-				return nil
-			end
-
-			for child in params_root:iter_children() do
-				if child:named() then
-					local found = first_identifier(child)
-					if found then
-						table.insert(out, found)
-					end
 				end
 			end
-			return out
+			if update_allowed then
+			local src_range = node_range(si.node)
+			local dst_range = node_range(di.node)
+			table.insert(actions, {
+				type     = "update",
+				src      = src_range,
+				dst      = dst_range,
+				src_node = si.node,
+				dst_node = di.node,
+				metadata = {
+					node_type = si.type,
+					old_name  = src_label,
+					new_name  = dst_label,
+					from_line = src_range and (src_range.start_row + 1) or nil,
+				},
+			})
 		end
 
-		-- Pass 1a: high-confidence declaration-like rename seeds from semantic leaf changes.
-		for _, action in ipairs(actions_list) do
-			if action.type == "update" and action.analysis and action.analysis.leaf_changes then
-				for _, change in ipairs(action.analysis.leaf_changes) do
-					local src_node = change.src_node
-					local dst_node = change.dst_node
-					if src_node and dst_node and change.src_text ~= change.dst_text and is_decl_rename(src_node, dst_node) then
-						add_seed(change.src_text, change.dst_text)
-					end
-				end
+		local src_parent = si.parent_id
+		local dst_parent = di.parent_id
+		if src_parent and dst_parent then
+			local src_parent_dst = s2d[src_parent]
+			if src_parent_dst ~= dst_parent then
+				moved_all[sid] = true
 			end
 		end
 
-		-- Pass 1a.2: positional parameter rename seeds/actions for updated functions.
-		if is_buf_available then
-			for _, action in ipairs(actions_list) do
-				if action.type == "update" and action.src_node and action.dst_node then
-					local src_params = collect_param_identifiers(action.src_node, src_buf)
-					local dst_params = collect_param_identifiers(action.dst_node, dst_buf)
-					if #src_params > 0 and #src_params == #dst_params and #src_params <= 16 then
-						for i = 1, #src_params do
-							local s = src_params[i]
-							local d = dst_params[i]
-							if s.text ~= d.text then
-								add_seed(s.text, d.text)
-								if is_decl_rename(s.node, d.node) then
-									push_rename(s.node, d.node, s.text, d.text, {
-										src_parent_type = action.src_node and action.src_node:type() or nil,
-										dst_parent_type = action.dst_node and action.dst_node:type() or nil,
-										source = "parameter_positional",
-										declaration = true,
-									})
-								end
+		::cont_mu::
+	end
+
+	local root_moved = {}
+	for sid in pairs(moved_all) do
+		local si = src_info[sid]
+		if si and (not si.parent_id or not moved_all[si.parent_id]) then
+			if (src_info[sid].size or 0) >= MIN_MOVE_SIZE then
+				root_moved[sid] = true
+			end
+		end
+	end
+
+	for sid in pairs(root_moved) do
+		local did = s2d[sid]
+		local si  = src_info[sid]
+		local di  = dst_info[did]
+		if si and di then
+			if not should_emit_move_type(si.type) then goto cont_mv end
+			if si.node and not si.node:named() then goto cont_mv end
+			if is_top_level_like(sid, src_info, src_root_id) and is_top_level_like(did, dst_info, dst_root_id) then
+				goto cont_mv
+			end
+			local src_range = node_range(si.node)
+			local dst_range = node_range(di.node)
+			table.insert(actions, {
+				type     = "move",
+				src      = src_range,
+				dst      = dst_range,
+				src_node = si.node,
+				dst_node = di.node,
+				metadata = {
+					node_type = si.type,
+					old_name  = node_label(si, src_buf),
+					new_name  = node_label(di, dst_buf),
+					from_line = src_range and (src_range.start_row + 1) or nil,
+					to_line   = dst_range and (dst_range.start_row + 1) or nil,
+				},
+			})
+			::cont_mv::
+		end
+	end
+
+	local enable_reorder_moves = opts.enable_reorder_moves == true
+	if enable_reorder_moves then
+		local processed_parent_pairs = {}
+		for _, m in ipairs(mappings) do
+			local sid = m.src
+			local did = m.dst
+			local si  = src_info[sid]
+			local di  = dst_info[did]
+			if not si or not di then goto skip_b end
+			if not si.parent_id or not di.parent_id then goto skip_b end
+			if not should_emit_move_type(si.type) then goto skip_b end
+
+			local src_pid = si.parent_id
+			local dst_pid = di.parent_id
+			if s2d[src_pid] ~= dst_pid then goto skip_b end  -- parent changed = handled above
+
+			local key = src_pid .. ":" .. dst_pid
+			if processed_parent_pairs[key] then goto skip_b end
+			processed_parent_pairs[key] = true
+
+			do
+				local src_pos = child_positions(src_pid, src_info)
+				local dst_pos = child_positions(dst_pid, dst_info)
+
+				local pairs_by_src_order = {}
+				for cid, spos in pairs(src_pos) do
+					local dcid = s2d[cid]
+					if dcid and dst_pos[dcid] then
+						table.insert(pairs_by_src_order, {
+							sid   = cid,
+							did   = dcid,
+							spos  = spos,
+							dpos  = dst_pos[dcid],
+						})
+					end
+				end
+				table.sort(pairs_by_src_order, function(a, b) return a.spos < b.spos end)
+
+				if #pairs_by_src_order < 2 then goto skip_b end
+
+				local dpos_seq = {}
+				for _, p in ipairs(pairs_by_src_order) do
+					table.insert(dpos_seq, p.dpos)
+				end
+
+				local in_lis = lis_membership(dpos_seq)
+
+				for i, p in ipairs(pairs_by_src_order) do
+					if not in_lis[i] then
+						local csi = src_info[p.sid]
+						local cdi = dst_info[p.did]
+						if csi and cdi and csi.node and csi.node:named() then
+							local sz = csi.size or 0
+							if sz >= MIN_MOVE_SIZE and not root_moved[p.sid] and not moved_all[p.sid] then
+								local src_range = node_range(csi.node)
+								local dst_range = node_range(cdi.node)
+								table.insert(actions, {
+									type     = "move",
+									src      = src_range,
+									dst      = dst_range,
+									src_node = csi.node,
+									dst_node = cdi.node,
+									metadata = {
+										node_type = csi.type,
+										old_name  = node_label(csi, src_buf),
+										new_name  = node_label(cdi, dst_buf),
+										from_line = src_range and (src_range.start_row + 1) or nil,
+										to_line   = dst_range and (dst_range.start_row + 1) or nil,
+									},
+								})
 							end
 						end
 					end
 				end
 			end
+
+			::skip_b::
+		end
+	end
+
+	local moved_src = {}
+	for _, action in ipairs(actions) do
+		if action.type == "move" and action.src_node then
+			moved_src[action.src_node:id()] = true
+		end
+	end
+
+	do
+		local TOP_LEVEL_MOVE_TYPES = {
+			function_definition = true,
+			function_declaration = true,
+			struct_specifier = true,
+			class_specifier = true,
+			enum_specifier = true,
+			class_declaration = true,
+			interface_declaration = true,
+			type_declaration = true,
+		}
+
+		local parent_groups = {}
+		for _, m in ipairs(mappings) do
+			local sid, did = m.src, m.dst
+			if sid == src_root_id or moved_src[sid] then goto skip_tl end
+			local si, di = src_info[sid], dst_info[did]
+			if not si or not di then goto skip_tl end
+			if not TOP_LEVEL_MOVE_TYPES[si.type] or si.type ~= di.type then goto skip_tl end
+			if not is_top_level_like(sid, src_info, src_root_id) then goto skip_tl end
+			if not is_top_level_like(did, dst_info, dst_root_id) then goto skip_tl end
+
+			local src_pid = si.parent_id or src_root_id
+			local dst_pid = di.parent_id or dst_root_id
+			local key = src_pid .. ":" .. dst_pid
+			if not parent_groups[key] then
+				parent_groups[key] = { src_pid = src_pid, dst_pid = dst_pid, items = {} }
+			end
+			table.insert(parent_groups[key].items, { sid = sid, did = did })
+			::skip_tl::
 		end
 
-		-- Pass 2: emit leaf rename actions gated by seeds (and declaration renames).
-		for _, action in ipairs(actions_list) do
-			if action.type == "update" and action.analysis and action.analysis.leaf_changes then
-				for _, change in ipairs(action.analysis.leaf_changes) do
-					local src_node = change.src_node
-					local dst_node = change.dst_node
-					local src_text = change.src_text
-					local dst_text = change.dst_text
-					if src_node and dst_node and src_text and dst_text and src_text ~= dst_text then
-						local is_decl = is_decl_rename(src_node, dst_node)
-						local key = pair_key(src_text, dst_text)
-						if seed_pairs[key] or is_decl then
-							push_rename(src_node, dst_node, src_text, dst_text, {
-								src_parent_type = action.src_node and action.src_node:type() or nil,
-								dst_parent_type = action.dst_node and action.dst_node:type() or nil,
-								declaration = is_decl,
-							})
+		for _, group in pairs(parent_groups) do
+			local items = group.items
+			if #items < 2 then goto next_group end
+
+			local src_pos = child_positions(group.src_pid, src_info)
+			local dst_pos = child_positions(group.dst_pid, dst_info)
+
+			table.sort(items, function(a, b)
+				return (src_pos[a.sid] or 0) < (src_pos[b.sid] or 0)
+			end)
+
+			local dpos_seq = {}
+			local disp_seq = {}
+			for idx, item in ipairs(items) do
+				local sp = src_pos[item.sid] or 0
+				local dp = dst_pos[item.did] or 0
+				table.insert(dpos_seq, dp)
+				table.insert(disp_seq, math.abs(sp - dp))
+			end
+
+			local in_lis = lis_membership(dpos_seq, disp_seq)
+
+			for i, item in ipairs(items) do
+				if not in_lis[i] then
+					local si = src_info[item.sid]
+					local di = dst_info[item.did]
+					if si and di and si.node and si.node:named() then
+						local old_name = node_label(si, src_buf)
+						local new_name = node_label(di, dst_buf)
+						local has_body = (old_name:find("{", 1, true) and new_name:find("{", 1, true))
+							or si.type == "function_declaration"
+							or si.type == "function_definition"
+						if has_body then
+							local src_range = node_range(si.node)
+							local dst_range = node_range(di.node)
+							if src_range and dst_range then
+								table.insert(actions, {
+									type = "move",
+									src = src_range,
+									dst = dst_range,
+									src_node = si.node,
+									dst_node = di.node,
+									metadata = {
+										node_type = si.type,
+										old_name = old_name,
+										new_name = new_name,
+										from_line = src_range.start_row + 1,
+										to_line = dst_range.start_row + 1,
+									},
+								})
+								moved_src[item.sid] = true
+							end
 						end
 					end
 				end
 			end
+			::next_group::
 		end
+	end
 
-		-- If a declaration rename exists for a pair, suppress usage-level duplicates for that pair.
-		local declaration_pairs = {}
-		for _, rename_action in ipairs(renames) do
-			local metadata = rename_action.metadata or {}
-			local from_name = metadata.old_name
-			local to_name = metadata.new_name
-			if rename_action.context and rename_action.context.declaration then
-				declaration_pairs[pair_key(from_name, to_name)] = true
+	do
+		local move_items = {}
+		for i, action in ipairs(actions) do
+			if action.type == "move" and action.src and action.dst then
+				table.insert(move_items, { idx = i, action = action })
 			end
 		end
-
-		local suppressed_by_pair = {}
-		local filtered_renames = {}
-		for _, rename_action in ipairs(renames) do
-			local metadata = rename_action.metadata or {}
-			local from_name = metadata.old_name
-			local to_name = metadata.new_name
-			local key = pair_key(from_name, to_name)
-			local is_declaration = rename_action.context and rename_action.context.declaration
-			if not declaration_pairs[key] or is_declaration then
-				table.insert(filtered_renames, rename_action)
-			else
-				suppressed_by_pair[key] = suppressed_by_pair[key] or {}
-				table.insert(suppressed_by_pair[key], {
-					src = rename_action.src,
-					dst = rename_action.dst,
-					metadata = {
-						old_name = from_name,
-						new_name = to_name,
-						from_line = metadata.from_line,
-						to_line = metadata.to_line,
-					},
-					context = rename_action.context,
-				})
+		table.sort(move_items, function(a, b)
+			local as = range_span(a.action.src)
+			local bs = range_span(b.action.src)
+			if as ~= bs then
+				return as > bs
 			end
-		end
+			return (a.action.src.start_row or 0) < (b.action.src.start_row or 0)
+		end)
 
-		for _, rename_action in ipairs(filtered_renames) do
-			if rename_action.context and rename_action.context.declaration then
-				local metadata = rename_action.metadata or {}
-				local from_name = metadata.old_name
-				local to_name = metadata.new_name
-				local key = pair_key(from_name, to_name)
-				local suppressed_usages = suppressed_by_pair[key]
-				if suppressed_usages and #suppressed_usages > 0 then
-					rename_action.context.suppressed_usages = suppressed_usages
-					rename_action.context.suppressed_usage_count = #suppressed_usages
-					if rename_action.metadata then
-						rename_action.metadata.suppressed_renames = suppressed_usages
+			local drop = {}
+			local kept = {}
+			local seen_src = {}
+			for _, item in ipairs(move_items) do
+				local action = item.action
+				local src_id = action.src_node and action.src_node:id() or nil
+				local dst_id = action.dst_node and action.dst_node:id() or nil
+				if src_id and seen_src[src_id] then
+					drop[item.idx] = true
+					goto continue_move
+				end
+				if src_id and dst_id and has_stable_mapped_neighbors(src_id, dst_id, src_info, dst_info, s2d, d2s) then
+					drop[item.idx] = true
+					goto continue_move
+				end
+				for _, parent_move in ipairs(kept) do
+					if range_contains(parent_move.src, action.src) and range_contains(parent_move.dst, action.dst) then
+						drop[item.idx] = true
+						goto continue_move
 					end
+			end
+			table.insert(kept, action)
+			if src_id then
+				seen_src[src_id] = true
+			end
+			::continue_move::
+		end
+
+		if next(drop) ~= nil then
+			local filtered = {}
+			for i, action in ipairs(actions) do
+				if not drop[i] then
+					table.insert(filtered, action)
 				end
 			end
-		end
-
-		for _, rename_action in ipairs(filtered_renames) do
-			table.insert(actions_list, rename_action)
+			actions = filtered
 		end
 	end
 
-	-- Build O(1) lookup tables
-	local precompute_start = start_timer()
-	local src_to_dst = {}
-	local dst_to_src = {}
-	for _, m in ipairs(mappings) do
-		src_to_dst[m.src] = m.dst
-		dst_to_src[m.dst] = m.src
+	local src_post = post_order(src_root, src_info)
+	for _, sid in ipairs(src_post) do
+		if s2d[sid] then goto cont_del end
+		local si = src_info[sid]
+		if not si then goto cont_del end
+		local parent_sid = si.parent_id
+		local src_size = si.size or 1
+		local size_ok = src_size > 1 and not LEAF_EDIT_TYPES[si.type]
+		if (not parent_sid or s2d[parent_sid]) and size_ok then
+			local range = node_range(si.node)
+			table.insert(actions, {
+				type     = "delete",
+				src      = range,
+				dst      = nil,
+				src_node = si.node,
+				dst_node = nil,
+				metadata = {
+					node_type = si.type,
+					old_name  = node_label(si, src_buf),
+					from_line = range and (range.start_row + 1) or nil,
+				},
+			})
+		end
+		::cont_del::
 	end
 
-	local roles_start = start_timer()
-	if src_buf and dst_buf then
-		if not src_role_index then
-			src_role_index = roles.build_index(src_root, src_buf)
-		end
-		if not dst_role_index then
-			dst_role_index = roles.build_index(dst_root, dst_buf)
-		end
-	end
-	stop_timer(roles_start, "roles")
-
-	local significant_types = {
-		function_declaration = true,
-		variable_declaration = true,
-		function_definition = true,
-		class_specifier = true,
-		struct_specifier = true,
-		enum_specifier = true,
-		union_specifier = true,
-		namespace_definition = true,
-		if_statement = true,
-		return_statement = true,
-		expression_statement = true,
-		assignment = true,
-		assignment_statement = true,
-		for_statement = true,
-		while_statement = true,
-		-- Python
-		class_definition = true,
-		import_statement = true,
-		import_from_statement = true,
-		decorator = true,
-		-- C
-		declaration = true,
-		field_declaration = true,
-		preproc_include = true,
-		preproc_def = true,
-		preproc_function_def = true,
-	}
-
-	local transparent_update_ancestors = {
-		struct_specifier = true,
-		class_specifier = true,
-	}
-
-	-- only these top-level constructs should be tracked for moves
-	local movable_types = {
-		function_declaration = true,
-		function_definition = true,
-		class_definition = true,
-		class_specifier = true,
-		struct_specifier = true,
-	}
-
-	local function has_kind(node, index, kind)
-		return index and roles.has_structural_kind(node, index, kind) or false
-	end
-
-	local function has_role_captures(index)
-		if not index or not index.by_capture then
-			return false
-		end
-		for capture, _ in pairs(index.by_capture) do
-			if capture ~= "diff.fallback.node" then
-				return true
-			end
-		end
-		return false
-	end
-
-	local src_uses_roles = has_role_captures(src_role_index)
-	local dst_uses_roles = has_role_captures(dst_role_index)
-
-	local function is_significant(info, index)
-		local uses_roles = (index == src_role_index and src_uses_roles) or (index == dst_role_index and dst_uses_roles)
-		local node = info.node
-		if has_kind(node, index, "function")
-			or has_kind(node, index, "class")
-			or has_kind(node, index, "variable")
-			or has_kind(node, index, "assignment")
-			or has_kind(node, index, "import")
-			or has_kind(node, index, "return")
-			or has_kind(node, index, "preproc")
-		then
-			return true
-		end
-		if uses_roles then
-			return false
-		end
-		return significant_types[info.type] or false
-	end
-
-	local function is_transparent_update_ancestor(info, index)
-		local uses_roles = (index == src_role_index and src_uses_roles) or (index == dst_role_index and dst_uses_roles)
-		if has_kind(info.node, index, "class") then
-			return true
-		end
-		if uses_roles then
-			return false
-		end
-		return transparent_update_ancestors[info.type] or false
-	end
-
-	local function is_movable(info, index)
-		local uses_roles = (index == src_role_index and src_uses_roles) or (index == dst_role_index and dst_uses_roles)
-		if has_kind(info.node, index, "function") or has_kind(info.node, index, "class") then
-			return true
-		end
-		if uses_roles then
-			return false
-		end
-		return movable_types[info.type] or false
-	end
-
-	local function should_emit_update(info, index)
-		if not is_significant(info, index) then
-			return false
-		end
-		-- Type/struct/class bodies are better represented by insert/delete or move+rename.
-		if has_kind(info.node, index, "class") then
-			return false
-		end
-		return true
-	end
-
-	-- Helper: check if node or any descendant has different content
-	local function has_content_change(src_node, dst_node)
-		local src_info_data = src_info[src_node:id()]
-		local dst_info_data = dst_info[dst_node:id()]
-
-		if src_info_data.hash ~= dst_info_data.hash then
-			return true
-		end
-
-		return false
-	end
-
-	local nodes_with_changes = {}
-	for _, m in ipairs(mappings) do
-		local s, d = src_info[m.src], dst_info[m.dst]
-		if has_content_change(s.node, d.node) then
-			nodes_with_changes[m.src] = true
-		end
-	end
-
-	local function parent_id_of(info)
-		if not info then
-			return nil
-		end
-		if info.parent_id ~= nil then
-			return info.parent_id
-		end
-		return info.parent and info.parent:id() or nil
-	end
-
-	local function memoized_ancestor_flags(info_map, predicate)
-		local memo = {}
-		local function has_match(id)
-			local cached = memo[id]
-			if cached ~= nil then
-				return cached
-			end
-			local info = info_map[id]
-			if not info then
-				memo[id] = false
-				return false
-			end
-			local parent_id = parent_id_of(info)
-			if not parent_id then
-				memo[id] = false
-				return false
-			end
-			local parent_info = info_map[parent_id]
-			if not parent_info then
-				memo[id] = false
-				return false
-			end
-			if predicate(parent_id, parent_info) then
-				memo[id] = true
-				return true
-			end
-			local result = has_match(parent_id)
-			memo[id] = result
-			return result
-		end
-		for id in pairs(info_map) do
-			has_match(id)
-		end
-		return memo
-	end
-
-	-- Precompute ancestry flags for source nodes (unmapped significant ancestors)
-	local src_has_unmapped_sig_ancestor = memoized_ancestor_flags(src_info, function(parent_id, parent_info)
-		return not src_to_dst[parent_id] and is_significant(parent_info, src_role_index)
-	end)
-
-	-- Precompute ancestry flags for destination nodes (unmapped significant ancestors)
-	local dst_has_unmapped_sig_ancestor = memoized_ancestor_flags(dst_info, function(parent_id, parent_info)
-		return not dst_to_src[parent_id] and is_significant(parent_info, dst_role_index)
-	end)
-
-	-- Precompute ancestry flags for updated significant ancestors
-	local src_has_updated_sig_ancestor = memoized_ancestor_flags(src_info, function(parent_id, parent_info)
-		return nodes_with_changes[parent_id]
-			and is_significant(parent_info, src_role_index)
-			and not is_transparent_update_ancestor(parent_info, src_role_index)
-	end)
-
-	-- UPDATES: mapped nodes with different content, but only significant types without updated ancestors
-	stop_timer(precompute_start, "precompute")
-	local updates_start = start_timer()
-	for _, m in ipairs(mappings) do
-		local s, d = src_info[m.src], dst_info[m.dst]
-
-		if nodes_with_changes[m.src] and should_emit_update(s, src_role_index) then
-			if not src_has_updated_sig_ancestor[m.src] then
-				table.insert(actions, build_action("update", s.node, d.node))
-			end
-		end
-	end
-	stop_timer(updates_start, "updates")
-
-	-- MOVES: use LCS to find which top-level mapped functions changed relative order
-	-- Only functions not in the LCS are considered moved.
-	local moves_start = start_timer()
-	local movable_pairs = {}
-	local src_root_id = src_root:id()
-	local dst_root_id = dst_root:id()
-	for _, m in ipairs(mappings) do
-		local s = src_info[m.src]
-		if s and is_movable(s, src_role_index) then
-			local src_parent_is_root = (s.parent_id or (s.parent and s.parent:id()) or nil) == src_root_id
-			local d = dst_info[m.dst]
-			local dst_parent_is_root = d and ((d.parent_id or (d.parent and d.parent:id()) or nil) == dst_root_id)
-			if src_parent_is_root and dst_parent_is_root then
-				local src_line = s.start_row
-				if src_line == nil then
-					src_line = s.node:range()
+	do
+		local filtered = {}
+		local seen_update_src = {}
+		for _, action in ipairs(actions) do
+			local keep = true
+			if action.type == "insert" and action.dst_node then
+				local did = action.dst_node:id()
+				if d2s[did] then
+					keep = false
 				end
-				local dst_line = d.start_row
-				if dst_line == nil then
-					dst_line = d.node:range()
+			elseif action.type == "delete" and action.src_node then
+				local sid = action.src_node:id()
+				if s2d[sid] then
+					keep = false
 				end
-				table.insert(movable_pairs, {
-					src_id = m.src,
-					dst_id = m.dst,
-					src_line = src_line,
-					dst_line = dst_line,
-				})
-			end
-		end
-	end
-
-	table.sort(movable_pairs, function(a, b)
-		return a.src_line < b.src_line
-	end)
-
-	-- Get destination line orders and compute LCS
-	local dst_order = {}
-	for i, pair in ipairs(movable_pairs) do
-		dst_order[i] = pair.dst_line
-	end
-
-	local function longest_increasing_subsequence(arr)
-		local n = #arr
-		if n == 0 then
-			return {}
-		end
-		local dp = {}
-		local prev = {}
-		for i = 1, n do
-			dp[i] = 1
-			prev[i] = nil
-			for j = 1, i - 1 do
-				if arr[j] < arr[i] and dp[j] + 1 > dp[i] then
-					dp[i] = dp[j] + 1
-					prev[i] = j
+			elseif action.type == "update" and action.src_node and action.dst_node then
+				local sid = action.src_node:id()
+				local did = action.dst_node:id()
+				if s2d[sid] ~= did then
+					keep = false
+				elseif seen_update_src[sid] then
+					keep = false
+				else
+					seen_update_src[sid] = true
+				end
+			elseif action.type == "move" and action.src_node and action.dst_node then
+				local sid = action.src_node:id()
+				local did = action.dst_node:id()
+				if s2d[sid] ~= did then
+					keep = false
 				end
 			end
-		end
-		local max_len, max_idx = 0, 1
-		for i = 1, n do
-			if dp[i] > max_len then
-				max_len = dp[i]
-				max_idx = i
+
+			if keep then
+				table.insert(filtered, action)
 			end
 		end
-		-- Reconstruct LIS indices
-		local lis_indices = {}
-		local idx = max_idx
-		while idx do
-			table.insert(lis_indices, 1, idx)
-			idx = prev[idx]
-		end
-		return lis_indices
+		actions = filtered
 	end
 
-	local lis_indices = longest_increasing_subsequence(dst_order)
-	local in_lis = {}
-	for _, i in ipairs(lis_indices) do
-		in_lis[i] = true
-	end
+	actions = add_control_condition_updates(actions, mappings, src_info, dst_info, src_buf, dst_buf)
+	actions = suppress_condition_nested_edits(actions)
+	actions = collapse_shorthand_pair_updates(actions, src_info, dst_info, s2d, src_buf, dst_buf)
+	actions = collapse_object_pair_updates(actions, src_info, dst_info, s2d, d2s, src_buf, dst_buf)
+	actions = collapse_redundant_field_wrappers(actions, src_info, dst_info, s2d, d2s)
+	actions = suppress_fragmented_updates(actions)
+	actions = suppress_nested_leaf_edits(actions)
+	actions = add_assignment_replacements(actions, mappings, src_info, dst_info, src_buf, dst_buf, s2d)
 
-	-- Mark nodes NOT in LIS as moved (only if line difference is significant)
-	local function has_structural_move_evidence(index)
-		local dst_line = movable_pairs[index].dst_line
-		for j, other in ipairs(movable_pairs) do
-			if j ~= index then
-				local dst_inversion = (j < index and other.dst_line > dst_line) or (j > index and other.dst_line < dst_line)
-				if dst_inversion then
-					return true
-				end
-			end
-		end
-		return false
-	end
-
-	-- Mark nodes NOT in LIS as moved only when there is real order inversion evidence.
-	-- If parse errors exist in either tree, keep move emission conservative.
-	for i, pair in ipairs(movable_pairs) do
-		if not in_lis[i] then
-			local line_diff = math.abs(pair.dst_line - pair.src_line)
-			if not has_parse_error and line_diff > 3 and has_structural_move_evidence(i) then
-				local s = src_info[pair.src_id]
-				local d = dst_info[pair.dst_id]
-				if s and d then
-					table.insert(actions, build_action("move", s.node, d.node))
-				end
-			end
-		end
-	end
-	stop_timer(moves_start, "moves")
-
-	-- DELETES: unmapped source nodes
-	local deletes_start = start_timer()
-	for id, info in pairs(src_info) do
-		if not src_to_dst[id] and is_significant(info, src_role_index) then
-			if not src_has_unmapped_sig_ancestor[id] then
-				table.insert(actions, build_action("delete", info.node, nil))
-			end
-		end
-	end
-	stop_timer(deletes_start, "deletes")
-
-	-- INSERTS: unmapped destination nodes
-	local inserts_start = start_timer()
-	for id, info in pairs(dst_info) do
-		if not dst_to_src[id] and is_significant(info, dst_role_index) then
-			if not dst_has_unmapped_sig_ancestor[id] then
-				table.insert(actions, build_action("insert", nil, info.node))
-			end
-		end
-	end
-	stop_timer(inserts_start, "inserts")
-
-	local semantic_start = start_timer()
-	enrich_update_actions_with_semantics(actions)
-	stop_timer(semantic_start, "semantic")
-
-	local rename_start = start_timer()
-	emit_rename_actions(actions)
-	stop_timer(rename_start, "renames")
-
-	local analysis_start = start_timer()
-	if src_buf and dst_buf then
-		analysis.enrich(actions, {
-			src_buf = src_buf,
-			dst_buf = dst_buf,
-		})
-	end
-	stop_timer(analysis_start, "analysis")
-
-	local update_suppress_start = start_timer()
-	local moved_pairs = {}
-	local declaration_rename_pairs = {}
-	for _, action in ipairs(actions) do
-		local key = action_pair_key(action)
-		if key then
-			if action.type == "move" then
-				moved_pairs[key] = true
-			elseif action.type == "rename" and action.context and action.context.declaration then
-				declaration_rename_pairs[key] = true
-			end
-		end
-	end
-
-	local filtered_actions = {}
-	for _, action in ipairs(actions) do
-		if action.type == "update" then
-			local key = action_pair_key(action)
-			local action_analysis = action.analysis or {}
-			local has_effective_hunks = has_effective_update_hunks(action, src_buf, dst_buf)
-			local has_any_hunks = action_analysis.hunks and #action_analysis.hunks > 0
-			local has_rename_pairs = action_analysis.rename_pairs and next(action_analysis.rename_pairs) ~= nil
-			local overlaps_decl_rename = key and declaration_rename_pairs[key] or false
-			local overlaps_move = key and moved_pairs[key] or false
-			if action_analysis.rename_only and has_rename_pairs and not has_effective_hunks then
-				goto continue
-			end
-			if overlaps_decl_rename and not has_effective_hunks then
-				goto continue
-			end
-			if overlaps_move and not has_effective_hunks then
-				goto continue
-			end
-			if not has_effective_hunks and not has_any_hunks then
-				goto continue
-			end
-		end
-		table.insert(filtered_actions, action)
-		::continue::
-	end
-	actions = filtered_actions
-	stop_timer(update_suppress_start, "update_suppress")
-
-	mark_temp_result_refactor_overrides(actions, src_buf, dst_buf)
-	mark_literal_member_render_overrides(actions)
-
-	local summary_start = start_timer()
-	local summary = build_summary(actions)
-	stop_timer(summary_start, "summary")
-
-	return actions, timings, summary
+	return actions
 end
 
 return M

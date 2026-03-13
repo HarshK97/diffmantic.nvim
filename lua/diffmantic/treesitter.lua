@@ -1,7 +1,7 @@
+local rules_mod = require("diffmantic.core.rules")
 local M = {}
 
 -- Simple hash function: takes a string and returns a number
--- Used to create unique identifiers for tree nodes
 local function string_hash(str)
 	local h = 5381
 	for i = 1, #str do
@@ -14,95 +14,123 @@ local function hash_combine(acc, value)
 	return ((acc * 33) + value + 97) % 4294967296
 end
 
--- A leaf node has no children (e.g., a variable name, number, string literal)
 local function is_leaf(node)
 	return node:named_child_count() == 0
 end
 
--- Get the text content of a node, but only if it's a leaf
--- Non-leaf nodes get empty label (their structure matters, not their text)
-local function get_label(node, bufnr)
+local function get_label(node, bufnr, rules, parent_type)
 	if is_leaf(node) then
+		if rules_mod.is_label_ignored(rules, node:type(), parent_type) then
+			return ""
+		end
 		return vim.treesitter.get_node_text(node, bufnr)
 	else
 		return ""
 	end
 end
 
--- Walk through the entire syntax tree and compute metadata for each node
--- Returns a table mapping node IDs to their computed info
 function M.preprocess_tree(root, bufnr, opts)
 	opts = opts or {}
+
+	local lang = opts.lang
+	if not lang then
+		local ft = vim.bo[bufnr] and vim.bo[bufnr].filetype or ""
+		lang = vim.treesitter.language.get_lang(ft) or ft
+	end
+	local rules = rules_mod.get(lang)
+
 	local info = {}
 	local label_hash_cache = {}
-	local type_hash_cache = {}
+	local type_hash_cache  = {}
 
-	local function cached_string_hash(cache, text)
-		local value = cache[text]
-		if value == nil then
-			value = string_hash(text)
-			cache[text] = value
-		end
-		return value
+	local function cached_hash(cache, text)
+		local v = cache[text]
+		if v == nil then v = string_hash(text); cache[text] = v end
+		return v
 	end
 
-	local function visit(node)
-		local id = node:id()
-		local type = node:type()
-		local label = get_label(node, bufnr)
-		local sr, sc, er, ec = node:range()
+	local function visit(node, parent_id, parent_type)
+		local id    = node:id()
+		local type_ = node:type()
 
-		local height = 1
-		local size = 1
-		local hash_acc = cached_string_hash(type_hash_cache, type)
-		local structure_hash_acc = hash_acc
-
-		-- Recursively process all children first (post-order traversal)
-		for child in node:iter_children() do
-			local child_info = visit(child)
-			height = math.max(height, child_info.height + 1)
-			size = size + child_info.size
-			hash_acc = hash_combine(hash_acc, child_info.hash)
-			structure_hash_acc = hash_combine(structure_hash_acc, child_info.structure_hash)
-			child_info.parent = node
-			child_info.parent_id = id
+		if rules_mod.is_ignored(rules, type_, parent_type) then
+			return nil
 		end
 
+		local hash_type = rules_mod.canonical_type(rules, type_, parent_type)
+		local sr, sc, er, ec = node:range()
+		local _, _, sb, _, _, eb = node:range(true)
+
+		if rules_mod.is_flattened(rules, type_, parent_type) then
+			local full_text = ""
+			if not rules_mod.is_label_ignored(rules, type_, parent_type) then
+				full_text = vim.treesitter.get_node_text(node, bufnr) or ""
+			end
+			local h = cached_hash(type_hash_cache, hash_type)
+			h = hash_combine(h, cached_hash(label_hash_cache, full_text))
+			info[id] = {
+				node      = node,
+				height    = 1,
+				size      = 1,
+				hash      = h,
+				structure_hash = cached_hash(type_hash_cache, hash_type),
+				type      = type_,
+				label     = full_text,
+				id        = id,
+				start_row = sr, start_col = sc,
+				end_row   = er, end_col   = ec,
+				start_byte = sb,
+				end_byte   = eb,
+				parent_id = parent_id,
+			}
+			return info[id]
+		end
+
+		local height          = 1
+		local size            = 1
+		local hash_acc        = cached_hash(type_hash_cache, hash_type)
+		local struct_hash_acc = hash_acc
+
+		for child in node:iter_children() do
+			local cinfo = visit(child, id, type_)
+			if cinfo then
+				height        = math.max(height, cinfo.height + 1)
+				size          = size + cinfo.size
+				hash_acc      = hash_combine(hash_acc, cinfo.hash)
+				struct_hash_acc = hash_combine(struct_hash_acc, cinfo.structure_hash)
+				cinfo.parent_id = id
+			end
+		end
+
+		local label = get_label(node, bufnr, rules, parent_type)
 		if label ~= "" then
-			hash_acc = hash_combine(hash_acc, cached_string_hash(label_hash_cache, label))
+			hash_acc = hash_combine(hash_acc, cached_hash(label_hash_cache, label))
 		else
 			hash_acc = hash_combine(hash_acc, 0)
 		end
 
-		-- hash: unique if type + label + children all match (exact match)
-		local hash = hash_acc
-		-- structure_hash: unique if type + children structure match (ignores labels)
-		-- useful for detecting moved/renamed code
-		local structure_hash = structure_hash_acc
-
 		info[id] = {
-			node = node,
-			height = height,
-			size = size,
-			hash = hash,
-			structure_hash = structure_hash,
-			type = type,
-			label = label,
-			id = id,
-			start_row = sr,
-			start_col = sc,
-			end_row = er,
-			end_col = ec,
-			parent_id = nil,
+			node           = node,
+			height         = height,
+			size           = size,
+			hash           = hash_acc,
+			structure_hash = struct_hash_acc,
+			type           = type_,
+			label          = label,
+			id             = id,
+			start_row      = sr, start_col = sc,
+			end_row        = er, end_col   = ec,
+			start_byte     = sb,
+			end_byte       = eb,
+			parent_id      = parent_id,
 		}
 		return info[id]
 	end
 
-	visit(root)
+	visit(root, nil, nil)
 	return info
 end
 
--- Get all nodes under a given node (children, grandchildren, etc.)
 function M.get_descendants(node)
 	local descendants = {}
 	local function traverse(n)
