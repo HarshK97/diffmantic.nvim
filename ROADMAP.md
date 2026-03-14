@@ -1,6 +1,6 @@
 # diffmantic.nvim Roadmap: v0.5 -> v1.0
 
-## Current State (rewrite/core branch)
+## Current State
 
 Why: stabilize the rewritten core pipeline before broadening integrations.
 
