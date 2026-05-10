@@ -17,6 +17,17 @@ Semantic diff for Neovim using Tree-sitter. Understands code structure to detect
 - **Rename detection** — Shows renamed variables and functions
 - **Language agnostic** — Works with languages that have Tree-sitter parsers and diffmantic query support
 
+## Coming Soon: diffmantic CLI
+
+A standalone Go CLI is in active development — the same semantic diff engine, usable everywhere:
+
+- **Terminal TUI** — Side-by-side diff viewer built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)
+- **git difftool** — Drop-in replacement: `git difftool -t diffmantic`
+- **Editor backends** — JSON output mode for Neovim and VS Code plugins
+- **CI / scripts** — Unified diff format for piping and automation
+
+The Neovim plugin will become a thin UI client that calls the CLI
+
 ## Installation
 
 Using [lazy.nvim](https://github.com/folke/lazy.nvim):
