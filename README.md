@@ -19,12 +19,7 @@ Semantic diff for Neovim using Tree-sitter. Understands code structure to detect
 
 ## Coming Soon: diffmantic CLI
 
-A standalone Go CLI is in active development — the same semantic diff engine, usable everywhere:
-
-- **Terminal TUI** — Side-by-side diff viewer built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)
-- **git difftool** — Drop-in replacement: `git difftool -t diffmantic`
-- **Editor backends** — JSON output mode for Neovim and VS Code plugins
-- **CI / scripts** — Unified diff format for piping and automation
+A standalone Go CLI is in active development: [diffmantic](https://github.com/HarshK97/diffmantic)
 
 The Neovim plugin will become a thin UI client that calls the CLI
 
